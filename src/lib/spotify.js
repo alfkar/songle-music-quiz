@@ -20,7 +20,28 @@ export async function getToken(code, redirectUri, code_verifier) {
       code_verifier: code_verifier,
     }),
   });
-  return await response.json();
+  const responseText = await response.text();
+  let data;
+
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    return {
+      error: 'invalid_token_response',
+      error_description: responseText.slice(0, 200),
+      status: response.status,
+      tokenEndpoint: SPOTIFY_TOKEN_ENDPOINT,
+    };
+  }
+
+  if (!response.ok) {
+    return {
+      ...data,
+      status: response.status,
+    };
+  }
+
+  return data;
 }
 
 export async function refreshToken(refreshToken) {
@@ -66,8 +87,8 @@ export async function getPlaylist(accessToken, playlistURI) {
  * Each object represents a track in the playlist.
  * https://developer.spotify.com/documentation/web-api/reference/get-playlists-tracks
  */
-export async function getSongsFromPlaylist(accessToken, nextUrl=null) {
-  let requestURL=SPOTIFY_PLAYLIST_ENDPOINT.concat(PLAYLIST_ID, '/tracks')
+export async function getSongsFromPlaylist(accessToken, nextUrl=null, playlistId=PLAYLIST_ID) {
+  let requestURL=SPOTIFY_PLAYLIST_ENDPOINT.concat(playlistId, '/tracks')
   if(nextUrl){
     console.log("Next URL: ", nextUrl)
     requestURL=nextUrl
@@ -87,7 +108,7 @@ export async function getSongsFromPlaylist(accessToken, nextUrl=null) {
       if(!data.next){
         return currentTracks
       }
-      const remainingTracks = await getSongsFromPlaylist(accessToken, data.next);
+      const remainingTracks = await getSongsFromPlaylist(accessToken, data.next, playlistId);
       return currentTracks.concat(remainingTracks);
     }
   }catch (error){
@@ -121,5 +142,23 @@ export async function playSong(accessToken, index, playerID) {
 
 
   return response
+}
+
+export async function playTrackUri(accessToken, trackUri, playerID) {
+  const url = `https://api.spotify.com/v1/me/player/play?device_id=${playerID}`;
+
+  const response = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Authorization': 'Bearer ' + accessToken,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      uris: [trackUri],
+      position_ms: 0,
+    })
+  });
+
+  return response;
 }
 

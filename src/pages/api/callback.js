@@ -16,13 +16,18 @@ export default async function handler(req, res) {
 
   try {
     const tokenResponse = await getToken(code, REDIRECT_URI, code_verifier);
-    res.setHeader('Set-Cookie', serialize('spotify_code_verifier', '', {
-      path: '/',
-      httpOnly: true,
-      maxAge: 0, 
-    }));
+
+    if (tokenResponse.error || !tokenResponse.access_token) {
+      console.error('Spotify token response error:', tokenResponse);
+      return res.redirect(`/?error=token_exchange_failed&reason=${encodeURIComponent(tokenResponse.error || 'missing_access_token')}`);
+    }
 
     res.setHeader('Set-Cookie', [
+      serialize('spotify_code_verifier', '', {
+        path: '/',
+        httpOnly: true,
+        maxAge: 0,
+      }),
       serialize('spotify_access_token', tokenResponse.access_token, { path: '/', httpOnly: false, maxAge: tokenResponse.expires_in }),
       serialize('spotify_refresh_token', tokenResponse.refresh_token, { path: '/', httpOnly: false }),
       serialize('spotify_expires_in', tokenResponse.expires_in.toString(), { path: '/', httpOnly: false, maxAge: tokenResponse.expires_in }),

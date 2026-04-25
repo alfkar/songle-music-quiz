@@ -5,6 +5,7 @@ import Login from '../components/Login';
 import Player from '../components/Player'
 import UserDashboard from '../components/UserDashboard';
 import PlayerCard from '@/components/PlayerCard';
+import { Button } from '@/components/ui/8bit/button';
 
 export default function Home() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -71,6 +72,9 @@ export default function Home() {
          {isLoggedIn && userData ? (
            <div>
            <UserDashboard userData={userData} onLogout={handleLogout} />
+           <div className="mb-6 flex justify-center">
+             <Button onClick={() => router.push('/quiz')}>Create Music Quiz</Button>
+           </div>
            <PlayerCard token={token}>
            </PlayerCard>
  

@@ -1,0 +1,28 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "songle-signaling",
+  "main": "src/index.js",
+  "compatibility_date": "2026-04-25",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ROOMS",
+        "class_name": "Room"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Room"]
+    }
+  ],
+  // After you pick a subdomain, uncomment this and replace the hostname.
+  // Cloudflare will create DNS/TLS for a Worker Custom Domain.
+  // "routes": [
+  //   {
+  //     "pattern": "signal.yourdomain.com",
+  //     "custom_domain": true
+  //   }
+  // ]
+}
