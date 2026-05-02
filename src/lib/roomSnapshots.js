@@ -5,19 +5,58 @@ function snapshotKey(roomId) {
   return `${SNAPSHOT_PREFIX}${roomId}`;
 }
 
+function pruneRoomSnapshots() {
+  const now = Date.now();
+  const snapshots = [];
+
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (!key?.startsWith(SNAPSHOT_PREFIX)) continue;
+
+    try {
+      const snapshot = JSON.parse(localStorage.getItem(key));
+      if (!snapshot?.expiresAt || snapshot.expiresAt <= now) {
+        localStorage.removeItem(key);
+        continue;
+      }
+
+      snapshots.push({
+        key,
+        savedAt: snapshot.savedAt || 0,
+      });
+    } catch {
+      localStorage.removeItem(key);
+    }
+  }
+
+  snapshots
+    .sort((a, b) => a.savedAt - b.savedAt)
+    .slice(0, Math.max(0, snapshots.length - 3))
+    .forEach((snapshot) => localStorage.removeItem(snapshot.key));
+}
+
 export function saveRoomSnapshot(roomId, snapshot) {
   if (!roomId || typeof localStorage === "undefined") return;
 
   const savedAt = Date.now();
-  localStorage.setItem(
-    snapshotKey(roomId),
-    JSON.stringify({
-      ...snapshot,
-      roomId,
-      savedAt,
-      expiresAt: savedAt + SNAPSHOT_TTL_MS,
-    })
-  );
+  const serializedSnapshot = JSON.stringify({
+    ...snapshot,
+    roomId,
+    savedAt,
+    expiresAt: savedAt + SNAPSHOT_TTL_MS,
+  });
+
+  try {
+    localStorage.setItem(snapshotKey(roomId), serializedSnapshot);
+  } catch (error) {
+    pruneRoomSnapshots();
+
+    try {
+      localStorage.setItem(snapshotKey(roomId), serializedSnapshot);
+    } catch (retryError) {
+      console.warn("Could not save room snapshot.", retryError || error);
+    }
+  }
 }
 
 export function loadRoomSnapshot(roomId) {
@@ -48,10 +87,12 @@ export function clearRoomSnapshot(roomId) {
 
 export function createSnapshot({ roomId, peerId, revision, session, catalog, localPlayer, phase }) {
   const nextRevision = revision || (session?.revision || 0) + 1;
+  const sentAtEpoch = Date.now();
 
   return {
     roomId,
     peerId,
+    sentAtEpoch,
     localPlayer,
     revision: nextRevision,
     phase,

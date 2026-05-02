@@ -1,88 +1,64 @@
-import React, { useState, useEffect } from 'react';
-import { useRouter } from 'next/router';
-import Cookies from 'js-cookie'; 
-import Login from '../components/Login';
-import Player from '../components/Player'
-import UserDashboard from '../components/UserDashboard';
-import PlayerCard from '@/components/PlayerCard';
-import { Button } from '@/components/ui/8bit/button';
+import Head from "next/head";
+import { useRouter } from "next/router";
+import { CalendarDays, Users } from "lucide-react";
+
+import SiteShell from "@/components/SiteShell";
+import { Button } from "@/components/ui/8bit/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/8bit/card";
 
 export default function Home() {
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [userData, setUserData] = useState(null);
-  const [token, setToken] = useState('');
   const router = useRouter();
 
-  useEffect(() => {
-    const accessToken = Cookies.get('spotify_access_token');
-    if (accessToken) {
-      setIsLoggedIn(true);
-      setToken(accessToken)
-      fetchUserData(accessToken);
-    } else {
-      setIsLoggedIn(false);
-      setUserData(null);
-    }
-  }, []); 
-
-  const fetchUserData = async (token) => {
-    try {
-      const response = await fetch('/api/user'); 
-      if (response.ok) {
-        const data = await response.json();
-        setUserData(data);
-      } else {
-        console.error('Failed to fetch user data');
-        setIsLoggedIn(false); 
-        Cookies.remove('spotify_access_token');
-        Cookies.remove('spotify_refresh_token');
-        Cookies.remove('spotify_expires_in');
-        Cookies.remove('spotify_expires');
-      }
-    } catch (error) {
-      console.error('Error fetching user data:', error);
-      setIsLoggedIn(false);
-      Cookies.remove('spotify_access_token');
-      Cookies.remove('spotify_refresh_token');
-      Cookies.remove('spotify_expires_in');
-      Cookies.remove('spotify_expires');
-    }
-  };
-
-  const handleLogout = () => {
-    setIsLoggedIn(false);
-    setUserData(null);
-    router.push('/');
-  };
-
-  const handleLoginSuccess = () => {
-    setIsLoggedIn(true);
-    const accessToken = Cookies.get('spotify_access_token');
-    if (accessToken) {
-      fetchUserData(accessToken);
-    }
-  };
-
   return (
-    <div className='grid items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)'>
-       <head>
-         <title>Spotify PKCE Next.js</title>
-       </head>
-       <main>
-         {isLoggedIn && userData ? (
-           <div>
-           <UserDashboard userData={userData} onLogout={handleLogout} />
-           <div className="mb-6 flex justify-center">
-             <Button onClick={() => router.push('/quiz')}>Create Music Quiz</Button>
-           </div>
-           <PlayerCard token={token}>
-           </PlayerCard>
- 
-           </div>
-         ) : (
-           <Login onLoginSuccess={handleLoginSuccess} />
-         )}
-       </main>
-     </div>
-   );
+    <SiteShell>
+      <Head>
+        <title>Songle</title>
+      </Head>
+
+      <section className="mx-auto grid min-h-[calc(100vh-145px)] w-full max-w-7xl content-center gap-8 px-6 py-10 sm:px-10">
+        <div className="max-w-3xl">
+          <h1 className="text-4xl font-bold sm:text-5xl">Choose your mode</h1>
+          <p className="mt-4 max-w-2xl text-muted-foreground">
+            Play the daily Songle challenge solo, or open a live music quiz room with friends.
+          </p>
+        </div>
+
+        <div className="grid gap-6 md:grid-cols-2">
+          <Card className="songle-card-frame songle-card-main">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-2xl">
+                <CalendarDays className="h-5 w-5" />
+                Daily Songle
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="flex min-h-52 flex-col justify-between gap-6">
+              <p className="text-sm text-muted-foreground">
+                One song per day. Guess the track and artist as fast as possible.
+              </p>
+              <Button onClick={() => router.push("/songle")} className="w-full">
+                Play Daily Songle
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card className="songle-card-frame songle-card-main">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-2xl">
+                <Users className="h-5 w-5" />
+                Music Quiz
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="flex min-h-52 flex-col justify-between gap-6">
+              <p className="text-sm text-muted-foreground">
+                Create or join a multiplayer room with synchronized Spotify playback.
+              </p>
+              <Button onClick={() => router.push("/quiz")} className="w-full">
+                Open Music Quiz
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      </section>
+    </SiteShell>
+  );
 }

@@ -1,13 +1,13 @@
 
 import { getToken } from '../../lib/spotify';
 import { serialize, parse } from 'cookie';
-
-const REDIRECT_URI = process.env.NEXT_PUBLIC_REDIRECT_URI;
+import { getRedirectUri } from '../../lib/redirectUri';
 
 export default async function handler(req, res) {
   const { code } = req.query;
   const cookies = parse(req.headers.cookie || '');
   const code_verifier = cookies.spotify_code_verifier;
+  const nextPath = cookies.spotify_login_next?.startsWith('/') ? cookies.spotify_login_next : '/';
 
   if (!code || !code_verifier) {
     console.error('Missing code or code_verifier');
@@ -15,7 +15,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const tokenResponse = await getToken(code, REDIRECT_URI, code_verifier);
+    const tokenResponse = await getToken(code, getRedirectUri(req), code_verifier);
 
     if (tokenResponse.error || !tokenResponse.access_token) {
       console.error('Spotify token response error:', tokenResponse);
@@ -28,13 +28,18 @@ export default async function handler(req, res) {
         httpOnly: true,
         maxAge: 0,
       }),
+      serialize('spotify_login_next', '', {
+        path: '/',
+        httpOnly: true,
+        maxAge: 0,
+      }),
       serialize('spotify_access_token', tokenResponse.access_token, { path: '/', httpOnly: false, maxAge: tokenResponse.expires_in }),
       serialize('spotify_refresh_token', tokenResponse.refresh_token, { path: '/', httpOnly: false }),
       serialize('spotify_expires_in', tokenResponse.expires_in.toString(), { path: '/', httpOnly: false, maxAge: tokenResponse.expires_in }),
       serialize('spotify_expires', (Date.now() + tokenResponse.expires_in * 1000).toString(), { path: '/', httpOnly: false, maxAge: tokenResponse.expires_in }),
     ]);
 
-    res.redirect('/');
+    res.redirect(nextPath);
 
   } catch (error) {
     console.error('Token exchange failed:', error);

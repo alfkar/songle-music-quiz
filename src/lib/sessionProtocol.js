@@ -1,6 +1,8 @@
 const SONG_POINTS = 1000;
 const ARTIST_POINTS = 750;
 const MIN_POINTS = 100;
+const BOTH_FIELDS_BONUS = 250;
+const WRONG_GUESS_POINTS = 50;
 
 export function createSession({ playlistId, catalog, hostName }) {
   return {
@@ -9,6 +11,8 @@ export function createSession({ playlistId, catalog, hostName }) {
     catalogSnapshotId: catalog.snapshotId,
     hostName,
     players: [],
+    activity: [],
+    activeVote: null,
     rounds: [],
     currentRound: null,
     scores: {},
@@ -20,7 +24,10 @@ export function createPlayer({ id, name, isHost = false }) {
     id: id || crypto.randomUUID(),
     name: name || "Player",
     isHost,
+    connected: true,
+    kicked: false,
     ready: false,
+    joinRoundNumber: 1,
   };
 }
 
@@ -41,17 +48,127 @@ export function createRound({ roundNumber, trackId, trackUri, startsAtEpoch }) {
 
 export function upsertPlayer(session, player) {
   const existingPlayer = session.players.find((currentPlayer) => currentPlayer.id === player.id);
+  const nextPlayer = {
+    ...player,
+    connected: player.connected ?? true,
+    kicked: player.kicked ?? false,
+    joinRoundNumber: player.joinRoundNumber ?? existingPlayer?.joinRoundNumber ?? 1,
+  };
   const players = existingPlayer
     ? session.players.map((currentPlayer) =>
         currentPlayer.id === player.id
-          ? { ...currentPlayer, ...player }
+          ? {
+              ...currentPlayer,
+              ...nextPlayer,
+              kicked: currentPlayer.kicked || nextPlayer.kicked,
+              connected: currentPlayer.kicked ? false : nextPlayer.connected,
+              ready: currentPlayer.kicked ? false : nextPlayer.ready,
+            }
           : currentPlayer
       )
-    : [...session.players, player];
+    : [...session.players, nextPlayer];
 
   return {
     ...session,
     players,
+  };
+}
+
+export function addActivity(session, text) {
+  if (!text) return session;
+
+  return {
+    ...session,
+    activity: [
+      ...(session.activity || []),
+      {
+        id: crypto.randomUUID(),
+        text,
+        createdAt: Date.now(),
+      },
+    ].slice(-25),
+  };
+}
+
+export function getActivePlayers(session) {
+  const nextRoundNumber = (session.rounds?.length || 0) + 1;
+  return session.players.filter(
+    (player) => !player.kicked && (player.joinRoundNumber || 1) <= nextRoundNumber
+  );
+}
+
+export function getRoundReadyPlayers(session) {
+  const nextRoundNumber = (session.rounds?.length || 0) + 1;
+  return getActivePlayers(session).filter(
+    (player) => player.connected && (player.joinRoundNumber || 1) <= nextRoundNumber
+  );
+}
+
+export function markPlayerLeft(session, playerId) {
+  const leavingPlayer = session.players.find((player) => player.id === playerId);
+  if (!leavingPlayer || !leavingPlayer.connected) return session;
+
+  return addActivity(
+    {
+      ...session,
+      players: session.players.map((player) =>
+        player.id === playerId ? { ...player, connected: false, ready: false } : player
+      ),
+    },
+    `${leavingPlayer.name} left the room.`
+  );
+}
+
+export function markPlayerKicked(session, playerId) {
+  const kickedPlayer = session.players.find((player) => player.id === playerId);
+  if (!kickedPlayer) return session;
+
+  return addActivity(
+    {
+      ...session,
+      activeVote: null,
+      players: session.players.map((player) =>
+        player.id === playerId
+          ? { ...player, connected: false, kicked: true, ready: false }
+          : player
+      ),
+    },
+    `${kickedPlayer.name} was removed from the session.`
+  );
+}
+
+export function applyWrongGuess(session, { playerId, field, guessText }) {
+  if (!session.currentRound || !playerId) return session;
+
+  const player = session.players.find((currentPlayer) => currentPlayer.id === playerId);
+  const wrongGuess = {
+    id: crypto.randomUUID(),
+    playerId,
+    playerName: player?.name || "Player",
+    field,
+    guessText,
+    points: -WRONG_GUESS_POINTS,
+    createdAt: Date.now(),
+  };
+
+  return {
+    ...session,
+    currentRound: {
+      ...session.currentRound,
+      wrongGuesses: [...(session.currentRound.wrongGuesses || []), wrongGuess],
+    },
+    rounds: session.rounds.map((round) =>
+      round.id === session.currentRound.id
+        ? {
+            ...round,
+            wrongGuesses: [...(round.wrongGuesses || []), wrongGuess],
+          }
+        : round
+    ),
+    scores: {
+      ...session.scores,
+      [playerId]: (session.scores[playerId] || 0) - WRONG_GUESS_POINTS,
+    },
   };
 }
 
@@ -75,7 +192,8 @@ export function resetPlayerReadiness(session) {
 }
 
 export function allPlayersReady(session) {
-  return session.players.length > 0 && session.players.every((player) => player.ready);
+  const activePlayers = getRoundReadyPlayers(session);
+  return activePlayers.length > 0 && activePlayers.every((player) => player.ready);
 }
 
 export function pointsForClaim(field, elapsedMs) {
@@ -84,33 +202,82 @@ export function pointsForClaim(field, elapsedMs) {
   return Math.max(MIN_POINTS, base - penalty);
 }
 
+function scoreRoundClaims(claims) {
+  const scoredClaims = claims.map((claim) => {
+    const basePoints = pointsForClaim(claim.field, claim.elapsedMs);
+    return {
+      ...claim,
+      basePoints,
+      bonusPoints: 0,
+      points: basePoints,
+      submittedAt: claim.submittedAt || performance.now(),
+    };
+  });
+  const songClaim = scoredClaims.find((claim) => claim.field === "song");
+  const artistClaim = scoredClaims.find((claim) => claim.field === "artist");
+
+  if (songClaim && artistClaim && songClaim.playerId === artistClaim.playerId) {
+    const bonusClaim =
+      artistClaim.elapsedMs >= songClaim.elapsedMs ? artistClaim : songClaim;
+    bonusClaim.bonusPoints = BOTH_FIELDS_BONUS;
+    bonusClaim.points = bonusClaim.basePoints + BOTH_FIELDS_BONUS;
+  }
+
+  return scoredClaims;
+}
+
+function scoreClaimsByPlayer(claims) {
+  return claims.reduce((scores, claim) => {
+    return {
+      ...scores,
+      [claim.playerId]: (scores[claim.playerId] || 0) + claim.points,
+    };
+  }, {});
+}
+
 export function applyClaim(session, claim) {
   if (!session.currentRound || session.currentRound.id !== claim.roundId) {
     return session;
   }
 
-  const alreadyClaimed = session.currentRound.claims.some(
-    (existingClaim) =>
-      existingClaim.playerId === claim.playerId &&
-      existingClaim.field === claim.field
+  const existingFieldClaim = session.currentRound.claims.find(
+    (existingClaim) => existingClaim.field === claim.field
   );
 
-  if (alreadyClaimed) {
+  if (existingFieldClaim && claim.elapsedMs >= existingFieldClaim.elapsedMs) {
     return session;
   }
 
-  const points = pointsForClaim(claim.field, claim.elapsedMs);
-  const scoredClaim = {
-    ...claim,
-    points,
-    submittedAt: performance.now(),
-  };
+  const claimsWithoutCurrentField = session.currentRound.claims.filter(
+    (existingClaim) => existingClaim.field !== claim.field
+  );
+  const previousRoundScores = scoreClaimsByPlayer(session.currentRound.claims);
+  const nextClaims = scoreRoundClaims([
+    ...claimsWithoutCurrentField,
+    {
+      ...claim,
+      submittedAt: performance.now(),
+    },
+  ]);
+  const nextRoundScores = scoreClaimsByPlayer(nextClaims);
+  const allRoundPlayerIds = new Set([
+    ...Object.keys(previousRoundScores),
+    ...Object.keys(nextRoundScores),
+  ]);
+  const nextScores = { ...session.scores };
+
+  allRoundPlayerIds.forEach((playerId) => {
+    nextScores[playerId] =
+      (nextScores[playerId] || 0) -
+      (previousRoundScores[playerId] || 0) +
+      (nextRoundScores[playerId] || 0);
+  });
 
   return {
     ...session,
     currentRound: {
       ...session.currentRound,
-      claims: [...session.currentRound.claims, scoredClaim],
+      claims: nextClaims,
       completedFields: {
         ...session.currentRound.completedFields,
         [claim.field]: true,
@@ -120,7 +287,7 @@ export function applyClaim(session, claim) {
       round.id === session.currentRound.id
         ? {
             ...round,
-            claims: [...round.claims, scoredClaim],
+            claims: nextClaims,
             completedFields: {
               ...round.completedFields,
               [claim.field]: true,
@@ -128,10 +295,7 @@ export function applyClaim(session, claim) {
           }
         : round
     ),
-    scores: {
-      ...session.scores,
-      [claim.playerId]: (session.scores[claim.playerId] || 0) + points,
-    },
+    scores: nextScores,
   };
 }
 

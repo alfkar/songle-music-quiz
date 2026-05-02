@@ -6,6 +6,24 @@ const CLIENT_ID = process.env.NEXT_PUBLIC_SPOTIFY_CLIENT_ID;
 const PLAYLIST_ID = process.env.NEXT_PUBLIC_SONGLE_PLAYLIST_ID;
 const SPOTIFY_PLAY_SONG_ENDPINT = process.env.NEXT_PUBLIC_SPOTIFY_PLAY_SONG;
 
+export function getPlaylistId(value) {
+  const rawValue = String(value || "").trim();
+  if (!rawValue) return "";
+
+  const uriMatch = rawValue.match(/^spotify:playlist:([^?]+)/);
+  if (uriMatch) return uriMatch[1];
+
+  try {
+    const url = new URL(rawValue);
+    const [, playlistType, playlistId] = url.pathname.split("/");
+    if (playlistType === "playlist" && playlistId) return playlistId;
+  } catch {
+    // Not a URL, so treat the value as a plain playlist ID.
+  }
+
+  return rawValue.split("?")[0];
+}
+
 export async function getToken(code, redirectUri, code_verifier) {
   const response = await fetch(SPOTIFY_TOKEN_ENDPOINT, {
     method: 'POST',
@@ -71,7 +89,7 @@ export async function getUserData(accessToken) {
   return await response.json();
 }
 export async function getPlaylist(accessToken, playlistURI) {
-    const url = SPOTIFY_PLAYLIST_ENDPOINT.concat(playlistURI)
+    const url = SPOTIFY_PLAYLIST_ENDPOINT.concat(getPlaylistId(playlistURI))
     const response = await fetch(url, {
       method: 'GET',
       headers: { 'Authorization': 'Bearer ' + accessToken },
@@ -88,7 +106,7 @@ export async function getPlaylist(accessToken, playlistURI) {
  * https://developer.spotify.com/documentation/web-api/reference/get-playlists-tracks
  */
 export async function getSongsFromPlaylist(accessToken, nextUrl=null, playlistId=PLAYLIST_ID) {
-  let requestURL=SPOTIFY_PLAYLIST_ENDPOINT.concat(playlistId, '/tracks')
+  let requestURL=SPOTIFY_PLAYLIST_ENDPOINT.concat(getPlaylistId(playlistId), '/tracks')
   if(nextUrl){
     console.log("Next URL: ", nextUrl)
     requestURL=nextUrl

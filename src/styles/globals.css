@@ -50,6 +50,8 @@
   }
   body {
     @apply bg-background text-foreground;
+    --songle-accent: #0f766e;
+    --songle-accent-soft: #14b8a6;
   }
 }
 @keyframes shake-error {
@@ -72,4 +74,145 @@
 }
 .marquee {
   animation: marquee 15s linear infinite;
+}
+
+@keyframes songle-toast-in {
+  0% { opacity: 0; transform: translateY(-8px) scale(0.98); }
+  12% { opacity: 1; transform: translateY(0) scale(1); }
+  88% { opacity: 1; transform: translateY(0) scale(1); }
+  100% { opacity: 0; transform: translateY(-6px) scale(0.98); }
+}
+.songle-toast {
+  animation: songle-toast-in 2.8s ease both;
+}
+
+@keyframes songle-context-overlay {
+  0% { opacity: 0; transform: translateY(8px); }
+  15% { opacity: 1; transform: translateY(0); }
+  82% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-8px); }
+}
+.songle-context-overlay {
+  animation: songle-context-overlay 2.6s ease both;
+}
+
+@keyframes songle-flash-row {
+  0% { background-color: color-mix(in oklab, var(--songle-accent) 28%, transparent); box-shadow: inset 4px 0 0 var(--songle-accent); transform: translateY(2px); }
+  45% { background-color: color-mix(in oklab, var(--songle-accent) 14%, transparent); box-shadow: inset 4px 0 0 var(--songle-accent); transform: translateY(0); }
+  100% { background-color: transparent; transform: translateY(0); }
+}
+.songle-flash-row {
+  animation: songle-flash-row 1.4s ease both;
+}
+
+@keyframes songle-score-pop {
+  0% { transform: scale(1); background-color: transparent; }
+  35% { transform: scale(1.08); background-color: color-mix(in oklab, var(--songle-accent) 18%, transparent); }
+  100% { transform: scale(1); background-color: transparent; }
+}
+.songle-score-pop {
+  animation: songle-score-pop 1.4s ease both;
+}
+
+@keyframes songle-correct-guess {
+  0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--songle-accent) 0%, transparent); }
+  35% { box-shadow: 0 0 0 4px color-mix(in oklab, var(--songle-accent) 22%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--songle-accent) 0%, transparent); }
+}
+.songle-correct-guess {
+  animation: songle-correct-guess 1.2s ease both;
+}
+
+.songle-card-frame {
+  border: 0;
+  box-shadow:
+    inset 0 0 0 2px color-mix(in oklab, var(--foreground) 52%, transparent),
+    inset 0 0 0 6px color-mix(in oklab, var(--background) 92%, var(--foreground)),
+    0 10px 0 color-mix(in oklab, var(--foreground) 10%, transparent);
+}
+
+.songle-card-main {
+  background:
+    linear-gradient(180deg, color-mix(in oklab, var(--card) 94%, var(--foreground)), var(--card));
+}
+
+.songle-card-side {
+  background:
+    linear-gradient(180deg, color-mix(in oklab, var(--card) 97%, var(--foreground)), var(--card));
+}
+
+.songle-inner-panel,
+.songle-guess-panel,
+.songle-row-frame,
+.songle-score-pill,
+.songle-ready-cell {
+  border: 0;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklab, var(--foreground) 28%, transparent),
+    inset 0 -3px 0 color-mix(in oklab, var(--foreground) 9%, transparent);
+  background-color: color-mix(in oklab, var(--card) 96%, var(--foreground));
+}
+
+.songle-row-frame {
+  transition: background-color 160ms ease, transform 160ms ease;
+}
+
+.songle-row-frame:hover {
+  background-color: color-mix(in oklab, var(--card) 90%, var(--foreground));
+}
+
+.songle-ready-cell {
+  background-color: color-mix(in oklab, var(--background) 92%, var(--foreground));
+}
+
+.songle-score-pill {
+  font-variant-numeric: tabular-nums;
+}
+
+.songle-solved-song {
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--songle-accent) 16%, transparent),
+    transparent 55%
+  );
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklab, var(--songle-accent) 42%, transparent),
+    inset 4px 0 0 var(--songle-accent),
+    inset 0 -3px 0 color-mix(in oklab, var(--songle-accent) 14%, transparent);
+}
+
+.songle-solved-artist {
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--songle-accent) 8%, transparent),
+    transparent 55%
+  );
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklab, var(--songle-accent) 30%, transparent),
+    inset 4px 0 0 color-mix(in oklab, var(--songle-accent) 70%, var(--background)),
+    inset 0 -3px 0 color-mix(in oklab, var(--songle-accent) 10%, transparent);
+}
+
+.songle-solved-note {
+  box-shadow: inset 4px 0 0 var(--songle-accent);
+  background-color: color-mix(in oklab, var(--songle-accent) 12%, var(--card));
+}
+
+.songle-solved-note-soft {
+  box-shadow: inset 4px 0 0 color-mix(in oklab, var(--songle-accent) 65%, var(--background));
+  background-color: color-mix(in oklab, var(--songle-accent) 7%, var(--card));
+}
+
+@keyframes songle-round-complete {
+  0% { transform: translateX(0); filter: brightness(1); }
+  12% { transform: translateX(-8px) rotate(-0.4deg); filter: brightness(1.08); }
+  24% { transform: translateX(8px) rotate(0.4deg); }
+  36% { transform: translateX(-5px) rotate(-0.2deg); }
+  48% { transform: translateX(5px) rotate(0.2deg); }
+  64% { transform: translateX(0); filter: brightness(1.04); }
+  100% { transform: translateX(0); filter: brightness(1); }
+}
+
+.songle-round-complete {
+  animation: songle-round-complete 1.4s ease both;
 }

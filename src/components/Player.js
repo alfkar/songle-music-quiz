@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 
-function WebPlayback({token, isReady, stopPlaying}) {
+function WebPlayback({token, isReady, stopPlaying, stopPlaybackRequest}) {
     const [player, setPlayer] = useState(undefined);
     const [current_track, setTrack] = useState(track);
     const [id, setId] = useState('');
@@ -70,11 +70,46 @@ useEffect(() => {
 }, []);
 
 useEffect(() => {
-    if (stopPlaying && player) {
-        console.log('Stopping playback...');
-        player.pause();
+    if (!stopPlaying || !player) return;
+
+    console.log('Stopping playback...');
+    const fadeDurationMs = Math.max(0, stopPlaybackRequest?.fadeMs ?? 900);
+    let isCancelled = false;
+    const pauseAndRestoreVolume = () => {
+        Promise.resolve(player.pause()).finally(() => {
+            if (!isCancelled) {
+                player.setVolume(0.5);
+            }
+        });
+    };
+
+    if (fadeDurationMs === 0) {
+        player.setVolume(0);
+        pauseAndRestoreVolume();
+        return () => {
+            isCancelled = true;
+        };
     }
-}, [stopPlaying, player]); 
+
+    const startVolume = 0.5;
+    const startedAt = performance.now();
+    const fadeInterval = setInterval(() => {
+        const elapsedMs = performance.now() - startedAt;
+        const progress = Math.min(1, elapsedMs / fadeDurationMs);
+        const nextVolume = Math.max(0, startVolume * (1 - progress));
+        player.setVolume(nextVolume);
+
+        if (progress >= 1) {
+            clearInterval(fadeInterval);
+            pauseAndRestoreVolume();
+        }
+    }, 50);
+
+    return () => {
+        isCancelled = true;
+        clearInterval(fadeInterval);
+    };
+}, [stopPlaying, stopPlaybackRequest, player]); 
 
 
 return (
