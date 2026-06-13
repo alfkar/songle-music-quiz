@@ -19,6 +19,9 @@ export default function SiteShell({ children, userData, onLogout }) {
             <Link href="/quiz" className="px-2 py-1 font-bold hover:underline">
               Music Quiz
             </Link>
+            <Link href="/party-quiz" className="px-2 py-1 font-bold hover:underline">
+              Party Quiz
+            </Link>
             {userData ? (
               <Button onClick={onLogout} className="ml-1">
                 Logout

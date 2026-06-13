@@ -50,3 +50,6 @@ wrangler.jsonc
 .dev.vars*
 !.dev.vars.example
 !.env.example
+
+# local Codex tooling
+skills/

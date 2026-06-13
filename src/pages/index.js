@@ -1,6 +1,6 @@
 import Head from "next/head";
 import { useRouter } from "next/router";
-import { CalendarDays, Users } from "lucide-react";
+import { CalendarDays, Speaker, Users } from "lucide-react";
 
 import SiteShell from "@/components/SiteShell";
 import { Button } from "@/components/ui/8bit/button";
@@ -23,7 +23,7 @@ export default function Home() {
           </p>
         </div>
 
-        <div className="grid gap-6 md:grid-cols-2">
+        <div className="grid gap-6 md:grid-cols-3">
           <Card className="songle-card-frame songle-card-main">
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-2xl">
@@ -54,6 +54,23 @@ export default function Home() {
               </p>
               <Button onClick={() => router.push("/quiz")} className="w-full">
                 Open Music Quiz
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card className="songle-card-frame songle-card-main">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-2xl">
+                <Speaker className="h-5 w-5" />
+                Party Quiz
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="flex min-h-52 flex-col justify-between gap-6">
+              <p className="text-sm text-muted-foreground">
+                One host plays the music through speakers while everyone guesses on their phone.
+              </p>
+              <Button onClick={() => router.push("/party-quiz")} className="w-full">
+                Open Party Quiz
               </Button>
             </CardContent>
           </Card>

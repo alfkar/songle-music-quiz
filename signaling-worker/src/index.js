@@ -29,18 +29,31 @@ function getPeer(ws) {
 }
 
 function getPeers(ctx) {
-  return ctx.getWebSockets().map((ws) => getPeer(ws)).filter(Boolean);
+  return ctx.getWebSockets().map((ws) => getPeer(ws)).filter((peer) => peer && !peer.replaced);
+}
+
+function replaceExistingPeerSockets(ctx, peerId) {
+  ctx.getWebSockets()
+    .filter((ws) => {
+      const peer = getPeer(ws);
+      return peer && !peer.replaced && peer.peerId === peerId;
+    })
+    .forEach((ws) => {
+      const peer = getPeer(ws);
+      ws.serializeAttachment({ ...peer, replaced: true });
+      ws.close(1000, "Peer reconnected");
+    });
 }
 
 function getHostPeer(ctx, exceptPeerId) {
   return getPeers(ctx)
     .filter((peer) => peer.peerId !== exceptPeerId)
-    .find((peer) => peer.role === "host");
+    .find((peer) => peer.role === "host" && peer.canHost);
 }
 
 function electHostPeer(ctx, exceptPeerId) {
   return getPeers(ctx)
-    .filter((peer) => peer.peerId !== exceptPeerId)
+    .filter((peer) => peer.peerId !== exceptPeerId && peer.canHost)
     .sort((a, b) => {
       if (a.joinedAt !== b.joinedAt) {
         return a.joinedAt - b.joinedAt;
@@ -53,7 +66,10 @@ function electHostPeer(ctx, exceptPeerId) {
 function updatePeerRole(ctx, peerId, role) {
   const socket = ctx
     .getWebSockets()
-    .find((ws) => getPeer(ws)?.peerId === peerId);
+    .find((ws) => {
+      const peer = getPeer(ws);
+      return peer && !peer.replaced && peer.peerId === peerId;
+    });
 
   if (!socket) return null;
 
@@ -72,27 +88,32 @@ export class Room extends DurableObject {
     const url = new URL(request.url);
     const peerId = url.searchParams.get("peerId") || crypto.randomUUID();
     const name = url.searchParams.get("name") || "Player";
+    const requestedRole = url.searchParams.get("role") || "player";
+    const canHost =
+      url.searchParams.get("canHost") === "true" ||
+      (!url.searchParams.has("canHost") && requestedRole === "host");
+    replaceExistingPeerSockets(this.ctx, peerId);
     const currentHost = getHostPeer(this.ctx);
-    const role = currentHost ? "player" : "host";
+    const role = !currentHost && canHost ? "host" : "player";
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     const joinedAt = Date.now();
 
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ peerId, name, role, joinedAt });
+    server.serializeAttachment({ peerId, name, role, joinedAt, canHost });
 
     send(server, {
       type: "room:welcome",
       peerId,
-      hostPeerId: currentHost?.peerId || peerId,
+      hostPeerId: currentHost?.peerId || (role === "host" ? peerId : ""),
       peers: getPeers(this.ctx).filter((peer) => peer.peerId !== peerId),
     });
 
     this.broadcast(
       {
         type: "peer:joined",
-        peer: { peerId, name, role, joinedAt },
+        peer: { peerId, name, role, joinedAt, canHost },
       },
       peerId
     );
@@ -140,6 +161,11 @@ export class Room extends DurableObject {
   async webSocketClose(ws, code, reason) {
     const peer = getPeer(ws);
 
+    if (peer?.replaced) {
+      ws.close(code, reason);
+      return;
+    }
+
     if (peer) {
       this.broadcast({
         type: "peer:left",
@@ -156,6 +182,12 @@ export class Room extends DurableObject {
             hostPeerId: nextHost.peerId,
             reason: "host-left",
           }, peer.peerId);
+        } else {
+          this.broadcast({
+            type: "host:changed",
+            hostPeerId: "",
+            reason: "host-left-no-eligible-host",
+          }, peer.peerId);
         }
       }
     }
@@ -166,12 +198,18 @@ export class Room extends DurableObject {
   relaySignal(sender, message) {
     const target = this.ctx
       .getWebSockets()
-      .find((ws) => getPeer(ws)?.peerId === message.to);
+      .find((ws) => {
+        const peer = getPeer(ws);
+        return peer && !peer.replaced && peer.peerId === message.to;
+      });
 
     if (!target) {
       const senderSocket = this.ctx
         .getWebSockets()
-        .find((ws) => getPeer(ws)?.peerId === sender.peerId);
+        .find((ws) => {
+          const peer = getPeer(ws);
+          return peer && !peer.replaced && peer.peerId === sender.peerId;
+        });
 
       if (senderSocket) {
         send(senderSocket, {
@@ -194,7 +232,7 @@ export class Room extends DurableObject {
     for (const ws of this.ctx.getWebSockets()) {
       const peer = getPeer(ws);
 
-      if (!peer || peer.peerId === exceptPeerId) {
+      if (!peer || peer.replaced || peer.peerId === exceptPeerId) {
         continue;
       }
 

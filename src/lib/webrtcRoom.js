@@ -49,6 +49,8 @@ export function createWebRtcRoom({ peerId, signal, iceServers = DEFAULT_ICE_SERV
       connection,
       channel: null,
       polite,
+      ignoreOffer: false,
+      makingOffer: false,
     };
 
     connection.addEventListener("icecandidate", (event) => {
@@ -105,18 +107,36 @@ export function createWebRtcRoom({ peerId, signal, iceServers = DEFAULT_ICE_SERV
 
   async function callPeer(remotePeerId) {
     const peer = ensurePeer(remotePeerId, { createChannel: true });
-    const offer = await peer.connection.createOffer();
-    await peer.connection.setLocalDescription(offer);
-    signal(remotePeerId, {
-      kind: "offer",
-      description: peer.connection.localDescription,
-    });
+
+    if (peer.connection.signalingState !== "stable") return;
+
+    try {
+      peer.makingOffer = true;
+      const offer = await peer.connection.createOffer();
+      await peer.connection.setLocalDescription(offer);
+      signal(remotePeerId, {
+        kind: "offer",
+        description: peer.connection.localDescription,
+      });
+    } finally {
+      peer.makingOffer = false;
+    }
   }
 
   async function handleSignal(remotePeerId, payload) {
     const peer = ensurePeer(remotePeerId, { polite: peerId > remotePeerId });
 
     if (payload.kind === "offer") {
+      const offerCollision =
+        peer.makingOffer || peer.connection.signalingState !== "stable";
+
+      peer.ignoreOffer = !peer.polite && offerCollision;
+      if (peer.ignoreOffer) return;
+
+      if (offerCollision) {
+        await peer.connection.setLocalDescription({ type: "rollback" });
+      }
+
       await peer.connection.setRemoteDescription(payload.description);
       const answer = await peer.connection.createAnswer();
       await peer.connection.setLocalDescription(answer);
@@ -128,12 +148,18 @@ export function createWebRtcRoom({ peerId, signal, iceServers = DEFAULT_ICE_SERV
     }
 
     if (payload.kind === "answer") {
+      if (peer.connection.signalingState !== "have-local-offer") return;
+
       await peer.connection.setRemoteDescription(payload.description);
       return;
     }
 
     if (payload.kind === "ice-candidate" && payload.candidate) {
-      await peer.connection.addIceCandidate(payload.candidate);
+      try {
+        await peer.connection.addIceCandidate(payload.candidate);
+      } catch (error) {
+        if (!peer.ignoreOffer) throw error;
+      }
     }
   }
 

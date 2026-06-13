@@ -32,6 +32,8 @@ const QuizGuessPicker = React.forwardRef(function QuizGuessPicker({
   const [open, setOpen] = React.useState(false);
   const [search, setSearch] = React.useState("");
   const [keyboardSelectionActive, setKeyboardSelectionActive] = React.useState(false);
+  const [isMobile, setIsMobile] = React.useState(false);
+  const formRef = React.useRef(null);
   const commandListRef = React.useRef(null);
 
   React.useImperativeHandle(ref, () => ({
@@ -43,6 +45,29 @@ const QuizGuessPicker = React.forwardRef(function QuizGuessPicker({
   React.useEffect(() => {
     if (!value) setSearch("");
   }, [value]);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const mediaQuery = window.matchMedia("(max-width: 640px)");
+    const updateIsMobile = () => setIsMobile(mediaQuery.matches);
+
+    updateIsMobile();
+    mediaQuery.addEventListener?.("change", updateIsMobile);
+    return () => mediaQuery.removeEventListener?.("change", updateIsMobile);
+  }, []);
+
+  React.useEffect(() => {
+    if (!open || !isMobile) return;
+
+    requestAnimationFrame(() => {
+      formRef.current?.scrollIntoView({
+        block: "center",
+        inline: "nearest",
+        behavior: "smooth",
+      });
+    });
+  }, [isMobile, open]);
 
   const submitValue = React.useCallback((nextValue = value || search.trim()) => {
     const submittedValue = nextValue?.trim?.() || nextValue;
@@ -147,6 +172,7 @@ const QuizGuessPicker = React.forwardRef(function QuizGuessPicker({
 
   return (
     <form
+      ref={formRef}
       className="flex flex-col gap-3"
       onSubmit={(event) => {
         event.preventDefault();
@@ -171,9 +197,11 @@ const QuizGuessPicker = React.forwardRef(function QuizGuessPicker({
           </Button>
         </PopoverTrigger>
         <PopoverContent
-          className="w-[var(--radix-popover-trigger-width)] p-0"
-          side="bottom"
-          avoidCollisions={false}
+          className="songle-mobile-guess-popover w-[var(--radix-popover-trigger-width)] p-0"
+          side={isMobile ? "top" : "bottom"}
+          align="start"
+          sideOffset={isMobile ? 10 : 4}
+          avoidCollisions
         >
           <Command>
             <CommandInput
@@ -184,9 +212,19 @@ const QuizGuessPicker = React.forwardRef(function QuizGuessPicker({
                 setKeyboardSelectionActive(false);
               }}
               onKeyDown={handleInputKeyDown}
+              onFocus={() => {
+                if (!isMobile) return;
+                requestAnimationFrame(() => {
+                  formRef.current?.scrollIntoView({
+                    block: "center",
+                    inline: "nearest",
+                    behavior: "smooth",
+                  });
+                });
+              }}
             />
             <div ref={commandListRef}>
-              <CommandList className="max-h-64 overflow-y-auto">
+              <CommandList className="songle-mobile-guess-list max-h-64 overflow-y-auto">
                 <CommandEmpty>No match found.</CommandEmpty>
                 <CommandGroup>
                   {options.map((option, index) => (

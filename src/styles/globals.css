@@ -216,3 +216,45 @@
 .songle-round-complete {
   animation: songle-round-complete 1.4s ease both;
 }
+
+@media (max-width: 640px) {
+  html,
+  body {
+    overflow-x: hidden;
+  }
+
+  .songle-party-main-card {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .songle-party-main-card .songle-card-frame,
+  .songle-party-main-card .songle-inner-panel,
+  .songle-party-main-card .songle-guess-panel,
+  .songle-party-main-card .songle-row-frame {
+    max-width: 100%;
+  }
+
+  .songle-party-main-card button,
+  .songle-party-main-card input {
+    min-width: 0;
+  }
+
+  .songle-party-setup,
+  .songle-party-setup > *,
+  .songle-party-setup form,
+  .songle-party-setup label {
+    max-width: 100%;
+  }
+
+  .songle-party-setup input,
+  .songle-party-setup button,
+  .songle-party-setup [data-slot="select-trigger"] {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .songle-mobile-guess-list {
+    max-height: min(17rem, 42vh);
+  }
+}

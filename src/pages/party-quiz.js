@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Cookies from "js-cookie";
 import { useRouter } from "next/router";
-import Login from "@/components/Login";
 import Player from "@/components/Player";
 import QuizGuessPicker from "@/components/QuizGuessPicker";
 import SiteShell from "@/components/SiteShell";
@@ -21,7 +20,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { CheckCircle2, Menu, Music2, UserX, Vote, X, XCircle } from "lucide-react";
+import { CheckCircle2, Music2, UserX, Vote, X, XCircle } from "lucide-react";
 import { getPlaylist, getPlaylistId, getSongsFromPlaylist, playTrackUri } from "@/lib/spotify";
 import { buildQuizCatalog, getUniqueArtists } from "@/lib/quizCatalog";
 import { verifyArtistGuess, verifySongGuess } from "@/lib/guessVerifier";
@@ -44,12 +43,6 @@ import {
 } from "@/lib/sessionProtocol";
 import { createPeerId, createRoomId, createSignalingClient } from "@/lib/signalingClient";
 import { createWebRtcRoom } from "@/lib/webrtcRoom";
-import {
-  chooseNewestSnapshot,
-  createSnapshot,
-  loadRoomSnapshot,
-  saveRoomSnapshot,
-} from "@/lib/roomSnapshots";
 
 const DEFAULT_PLAYLIST_ID = process.env.NEXT_PUBLIC_SONGLE_PLAYLIST_ID || "";
 const SIGNALING_URL = process.env.NEXT_PUBLIC_SIGNALING_URL || "";
@@ -88,6 +81,10 @@ const ROUND_COMPLETE_FADE_BUFFER_MS = 80;
 const QUIZ_CATALOG_CACHE_PREFIX = "quiz-catalog:";
 const ROUND_START_DELAY_MS = 7000;
 const WRONG_GUESS_POINTS = 50;
+const PARTY_QUIZ_PATH = "/party-quiz";
+const HOST_PLAYBACK_CONFIRM_TIMEOUT_MS = 5000;
+const HOST_PLAYBACK_POLL_MS = 250;
+const SPOTIFY_TRANSIENT_STATUSES = new Set([502, 503, 504]);
 
 function formatTime(milliseconds) {
   const safeMilliseconds = Math.max(0, Math.floor(milliseconds || 0));
@@ -119,6 +116,19 @@ function playCountdownTick(value) {
   gain.connect(audioContext.destination);
   oscillator.start();
   oscillator.stop(audioContext.currentTime + 0.2);
+}
+
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function getPlaybackTrackUri(playbackState) {
+  return playbackState?.track_window?.current_track?.uri || playbackState?.currentTrackUri || "";
+}
+
+function isPlaybackStatePlayingTrack(playbackState, trackUri) {
+  if (!playbackState || !trackUri) return false;
+  return getPlaybackTrackUri(playbackState) === trackUri && playbackState.paused === false;
 }
 
 function createVote({ type, requestedBy, requestedByName, targetPlayerId, targetPlayerName, playlist }) {
@@ -203,6 +213,26 @@ function writeCachedQuizCatalog(cacheKey, catalog) {
   }
 }
 
+function createLiveSnapshot({ roomId, peerId, revision, session, catalog, localPlayer, phase }) {
+  const nextRevision = revision || (session?.revision || 0) + 1;
+  const sentAtEpoch = Date.now();
+
+  return {
+    roomId,
+    peerId,
+    sentAtEpoch,
+    localPlayer,
+    revision: nextRevision,
+    phase,
+    session: {
+      ...session,
+      revision: nextRevision,
+      phase,
+    },
+    catalog,
+  };
+}
+
 function translateCountdownSnapshotToLocalClock(snapshot) {
   if (
     !snapshot?.sentAtEpoch ||
@@ -252,7 +282,6 @@ export default function QuizPage() {
   const [isConnectedToSignal, setIsConnectedToSignal] = useState(false);
   const [connectedPeerIds, setConnectedPeerIds] = useState([]);
   const [signalStatus, setSignalStatus] = useState("");
-  const [cachedSnapshot, setCachedSnapshot] = useState(null);
   const [playlistId, setPlaylistId] = useState(DEFAULT_PLAYLIST_ID);
   const [playlistName, setPlaylistName] = useState("");
   const [playlistVoteId, setPlaylistVoteId] = useState("");
@@ -300,6 +329,7 @@ export default function QuizPage() {
   const playerInfoRef = useRef(null);
   const localPlayerRef = useRef(null);
   const isHostRef = useRef(false);
+  const hostPeerIdRef = useRef("");
   const phaseRef = useRef("setup");
   const pendingReadyRef = useRef(null);
   const pendingReadyRoundNumberRef = useRef(null);
@@ -309,6 +339,9 @@ export default function QuizPage() {
   const songGuessPickerRef = useRef(null);
   const artistGuessPickerRef = useRef(null);
   const heardClaimIdsRef = useRef(new Set());
+  const hostPlaybackStateRef = useRef(null);
+  const hostPlaybackRuntimeRef = useRef(null);
+  const liveStartedRoundIdsRef = useRef(new Set());
 
   const getJoinRoundNumber = (currentPhase = phaseRef.current, currentSession = sessionRef.current) => {
     const nextRoundNumber = (currentSession?.rounds.length || 0) + 1;
@@ -332,15 +365,6 @@ export default function QuizPage() {
     if (!queryRoomId) return;
 
     setRoomId(queryRoomId);
-    const snapshot = loadRoomSnapshot(queryRoomId);
-
-    if (!snapshot) {
-      setStatus("This room link is open, but this browser has no cached session for it.");
-      return;
-    }
-
-    setCachedSnapshot(snapshot);
-    setStatus(`Cached room found. Revision ${snapshot.revision} can be resumed.`);
   }, [router.isReady, router.query.room]);
 
   useEffect(() => {
@@ -360,6 +384,20 @@ export default function QuizPage() {
         setUserData(null);
       });
   }, []);
+
+  useEffect(() => {
+    if (isLoggedIn || hostName !== "Host") return;
+
+    const storedName = localStorage.getItem("songle-party-display-name");
+    if (storedName) {
+      setHostName(storedName);
+      return;
+    }
+
+    const generatedName = `Player ${Math.floor(1000 + Math.random() * 9000)}`;
+    localStorage.setItem("songle-party-display-name", generatedName);
+    setHostName(generatedName);
+  }, [hostName, isLoggedIn]);
 
   useEffect(() => {
     return () => {
@@ -438,6 +476,7 @@ export default function QuizPage() {
 
   useEffect(() => {
     isHostRef.current = Boolean(peerId && hostPeerId === peerId);
+    hostPeerIdRef.current = hostPeerId;
   }, [hostPeerId, peerId]);
 
   useEffect(() => {
@@ -464,7 +503,7 @@ export default function QuizPage() {
       );
     }
 
-    const snapshot = createSnapshot({
+    const snapshot = createLiveSnapshot({
       roomId,
       peerId,
       revision: snapshotRevisionRef.current,
@@ -474,7 +513,6 @@ export default function QuizPage() {
       phase,
     });
 
-    saveRoomSnapshot(roomId, snapshot);
     latestSnapshotRef.current = snapshot;
 
     if (!isHostRef.current) return;
@@ -546,8 +584,6 @@ export default function QuizPage() {
       }
     }
 
-    setCachedSnapshot(translatedSnapshot);
-    saveRoomSnapshot(translatedSnapshot.roomId, translatedSnapshot);
     snapshotRevisionRef.current = Math.max(snapshotRevisionRef.current, translatedSnapshot.revision || 0);
     setRoomId(translatedSnapshot.roomId);
     setCatalog(translatedSnapshot.catalog);
@@ -569,7 +605,7 @@ export default function QuizPage() {
   };
 
   const sendCurrentSnapshotTo = (targetPeerId) => {
-    const snapshot = latestSnapshotRef.current || (roomId ? loadRoomSnapshot(roomId) : null);
+    const snapshot = latestSnapshotRef.current;
     if (!snapshot) return;
 
     const snapshotMessage = {
@@ -651,7 +687,7 @@ export default function QuizPage() {
           type: "session:snapshot",
           reliable: true,
           revision: snapshotRevisionRef.current + 1,
-          state: createSnapshot({
+          state: createLiveSnapshot({
             roomId,
             peerId,
             revision: snapshotRevisionRef.current + 1,
@@ -990,7 +1026,7 @@ export default function QuizPage() {
           type: "session:snapshot",
           reliable: true,
           revision: joinedSession.revision || snapshotRevisionRef.current,
-          state: createSnapshot({
+          state: createLiveSnapshot({
             roomId,
             peerId,
             revision: snapshotRevisionRef.current,
@@ -1136,6 +1172,8 @@ export default function QuizPage() {
   const hasSongClaim = localClaims.some((claim) => claim.field === "song");
   const hasArtistClaim = localClaims.some((claim) => claim.field === "artist");
   const isHost = Boolean(peerId && hostPeerId === peerId);
+  const localPlaybackReady = !isHost || Boolean(playerInfo?.ready);
+  const canToggleReady = Boolean(localPlayer && catalog && !isRunning && phase !== "countdown");
   const activePlayers = useMemo(() => (session ? getActivePlayers(session) : []), [session]);
   const roundReadyPlayers = useMemo(() => (session ? getRoundReadyPlayers(session) : []), [session]);
   const inactivePlayers = useMemo(
@@ -1153,7 +1191,7 @@ export default function QuizPage() {
   const readySummary = session
     ? `Ready ${readyPlayers}/${roundReadyPlayers.length}`
     : "";
-  const inviteLink = roomId ? `${getOrigin()}/quiz?room=${roomId}` : "";
+  const inviteLink = roomId ? `${getOrigin()}${PARTY_QUIZ_PATH}?room=${roomId}` : "";
   const playerNameById = useMemo(() => {
     return Object.fromEntries((session?.players || []).map((player) => [player.id, player.name]));
   }, [session?.players]);
@@ -1201,34 +1239,9 @@ export default function QuizPage() {
     if (!nextRoomId) return;
 
     setRoomId(nextRoomId);
-    router.replace(`/quiz?room=${encodeURIComponent(nextRoomId)}`, undefined, {
+    router.replace(`${PARTY_QUIZ_PATH}?room=${encodeURIComponent(nextRoomId)}`, undefined, {
       shallow: true,
     });
-  };
-
-  const restoreSnapshot = (snapshot) => {
-    if (!snapshot?.session || !snapshot?.catalog) return;
-
-    const restoredLocalPlayer =
-      localPlayer ||
-      createPlayer({
-        id: peerId || snapshot.peerId,
-        name: hostName,
-        isHost: snapshot.session.hostName === hostName,
-      });
-    const restoredSession = upsertPlayer(snapshot.session, restoredLocalPlayer);
-
-    snapshotRevisionRef.current = snapshot.revision || 0;
-    setRoomId(snapshot.roomId);
-    setCatalog(snapshot.catalog);
-    setSession(restoredSession);
-    setLocalPlayer(restoredLocalPlayer);
-    setPlaylistId(snapshot.session.playlistId || snapshot.catalog.playlistId || playlistId);
-    setPlaylistName(snapshot.catalog.playlistName || playlistName);
-    setPhase(snapshot.phase === "round-live" ? "round-interrupted" : snapshot.phase || "lobby");
-    setIsRunning(false);
-    setStopPlaying(true);
-    setStatus("Room restored from this browser's one-hour cache.");
   };
 
   const connectToSignaling = (options = {}) => {
@@ -1262,7 +1275,7 @@ export default function QuizPage() {
 
     if (!roomId && !options.silent) {
       setRoomId(nextRoomId);
-      router.replace(`/quiz?room=${nextRoomId}`, undefined, { shallow: true });
+      router.replace(`${PARTY_QUIZ_PATH}?room=${nextRoomId}`, undefined, { shallow: true });
     } else if (!roomId) {
       setRoomId(nextRoomId);
     }
@@ -1275,7 +1288,7 @@ export default function QuizPage() {
       peerId,
       name: nextLocalPlayerWithJoinRound.name,
       role: session ? "host" : "player",
-      canHost: Boolean(session),
+      canHost: Boolean(tokenRef.current),
     });
 
     signalingRef.current = client;
@@ -1303,7 +1316,7 @@ export default function QuizPage() {
           player: localPlayerRef.current,
         });
       }
-      if (isHostRef.current) {
+      if (isHostRef.current || remotePeerId === hostPeerIdRef.current) {
         sendCurrentSnapshotTo(remotePeerId);
       }
     });
@@ -1329,14 +1342,6 @@ export default function QuizPage() {
         setStatus("Song already in progress. You will join the next round.");
       }
 
-      const snapshot = loadRoomSnapshot(nextRoomId);
-      if (snapshot) {
-        client.send({
-          type: "session:resume-available",
-          revision: snapshot.revision,
-          savedAt: snapshot.savedAt,
-        });
-      }
     });
 
     client.socket.addEventListener("close", () => {
@@ -1345,6 +1350,8 @@ export default function QuizPage() {
     });
 
     client.on("room:welcome", (message) => {
+      hostPeerIdRef.current = message.hostPeerId;
+
       setHostPeerId(message.hostPeerId);
       setPeers(message.peers || []);
 
@@ -1363,7 +1370,7 @@ export default function QuizPage() {
         message.peer,
       ]);
 
-      if (peerId < message.peer.peerId) {
+      if (peerId > message.peer.peerId) {
         webRtcRoom.callPeer(message.peer.peerId).catch((error) => {
           console.error("Error calling joined peer:", error);
         });
@@ -1383,38 +1390,25 @@ export default function QuizPage() {
     });
 
     client.on("host:changed", (message) => {
+      hostPeerIdRef.current = message.hostPeerId;
       setHostPeerId(message.hostPeerId);
       setSignalStatus(
-        message.hostPeerId === peerId
+        !message.hostPeerId
+          ? "Waiting for the Spotify host to reconnect."
+          : message.hostPeerId === peerId
           ? "You are now the live room host."
           : "The live room host changed."
       );
+
+      if (message.hostPeerId && message.hostPeerId !== peerId) {
+        setTimeout(() => sendCurrentSnapshotTo(message.hostPeerId), 0);
+      }
     });
 
     client.on("signal", (message) => {
       webRtcRoom.handleSignal(message.from, message.payload).catch((error) => {
         console.error("Error handling WebRTC signal:", error);
       });
-    });
-
-    client.on("session:resume-available", (message) => {
-      const localSnapshot = loadRoomSnapshot(nextRoomId);
-      const winner = chooseNewestSnapshot([
-        localSnapshot,
-        {
-          revision: message.revision,
-          savedAt: message.savedAt,
-          peerId: message.from,
-        },
-      ]);
-
-      if (winner?.peerId === peerId && localSnapshot) {
-        client.send({
-          type: "session:snapshot",
-          revision: localSnapshot.revision,
-          state: localSnapshot,
-        });
-      }
     });
 
     client.on("session:snapshot", (message) => {
@@ -1553,7 +1547,7 @@ export default function QuizPage() {
         players: [host],
       });
       setPhase("lobby");
-      router.replace(`/quiz?room=${nextRoomId}`, undefined, { shallow: true });
+      router.replace(`${PARTY_QUIZ_PATH}?room=${nextRoomId}`, undefined, { shallow: true });
       setStatus(`Loaded ${nextCatalog.tracks.length} songs from the host playlist.`);
     } catch (error) {
       console.error("Error creating quiz session:", error);
@@ -1592,6 +1586,76 @@ export default function QuizPage() {
     setIsSynchronizingRound(false);
   };
 
+  const beginLiveRound = (round, nextStatus) => {
+    if (!round || liveStartedRoundIdsRef.current.has(round.id)) return;
+
+    liveStartedRoundIdsRef.current.add(round.id);
+    startTimer();
+    setPhase("round-live");
+    setStatus(nextStatus);
+  };
+
+  const activateHostPlaybackElement = async () => {
+    try {
+      await hostPlaybackRuntimeRef.current?.activateElement?.();
+    } catch (error) {
+      console.warn("Could not activate Spotify playback element.", error);
+    }
+  };
+
+  const readHostPlaybackState = async () => {
+    const runtime = hostPlaybackRuntimeRef.current;
+    if (!runtime?.getCurrentState) return hostPlaybackStateRef.current;
+
+    try {
+      const sdkState = await runtime.getCurrentState();
+      if (sdkState) {
+        const nextState = {
+          ...hostPlaybackStateRef.current,
+          active: true,
+          paused: sdkState.paused,
+          currentTrackUri: sdkState.track_window?.current_track?.uri,
+          currentTrackId: sdkState.track_window?.current_track?.id,
+          position: sdkState.position,
+        };
+        hostPlaybackStateRef.current = nextState;
+        return nextState;
+      }
+    } catch (error) {
+      console.warn("Could not read Spotify playback state.", error);
+    }
+
+    return hostPlaybackStateRef.current;
+  };
+
+  const waitForHostPlayback = async (round, timeoutMs = HOST_PLAYBACK_CONFIRM_TIMEOUT_MS) => {
+    const startedAt = performance.now();
+
+    while (performance.now() - startedAt < timeoutMs) {
+      const playbackState = await readHostPlaybackState();
+      if (isPlaybackStatePlayingTrack(playbackState, round.trackUri)) {
+        return true;
+      }
+      await wait(HOST_PLAYBACK_POLL_MS);
+    }
+
+    return false;
+  };
+
+  const recoverHostPlayback = async () => {
+    const round = sessionRef.current?.currentRound;
+    if (!round || !isHostRef.current) return;
+
+    setStatus("Checking host Spotify playback...");
+    const isPlaying = await waitForHostPlayback(round, 1200);
+    if (isPlaying) {
+      beginLiveRound(round, "Round live. Host playback recovered.");
+      return;
+    }
+
+    setStatus("Host playback is not confirmed yet. Try again once the song is audible.");
+  };
+
   const scheduleRoundPlayback = (round) => {
     if (!round || startedRoundIdRef.current === round.id) return;
 
@@ -1626,29 +1690,86 @@ export default function QuizPage() {
     countdownTimeoutRef.current = setTimeout(async () => {
       clearCountdown();
 
+      const shouldPlayLocalAudio = isHostRef.current;
       const spotifyPlayer = playerInfoRef.current;
       const spotifyToken = tokenRef.current;
 
-      if (!spotifyPlayer?.ready || !spotifyToken) {
-        setStatus("Spotify player is not ready in this browser.");
-        return;
-      }
-
-      try {
-        const response = await playTrackUri(spotifyToken, round.trackUri, spotifyPlayer.id);
-        if (!response.ok) {
-          setStatus(`Spotify could not start playback (${response.status}).`);
+      if (shouldPlayLocalAudio) {
+        if (!spotifyPlayer?.ready || !spotifyToken) {
+          setStatus("Host Spotify player is not ready.");
+          startedRoundIdRef.current = null;
           return;
         }
 
-        startTimer();
-        setPhase("round-live");
-        setStatus("Round live. Guess as fast as you can.");
-      } catch (error) {
-        console.error("Error starting synchronized playback:", error);
-        setStatus("Could not start synchronized playback.");
+        await activateHostPlaybackElement();
+        setStatus("Starting host Spotify playback...");
+
+        try {
+          const response = await playTrackUri(spotifyToken, round.trackUri, spotifyPlayer.id);
+
+          if (response.ok) {
+            beginLiveRound(round, "Round live. Playing from this host device.");
+            return;
+          }
+
+          if (SPOTIFY_TRANSIENT_STATUSES.has(response.status)) {
+            console.warn("Spotify returned a transient playback status.", {
+              status: response.status,
+              trackUri: round.trackUri,
+              deviceId: spotifyPlayer.id,
+            });
+            setStatus(`Spotify returned ${response.status}. Confirming whether playback started...`);
+
+            if (await waitForHostPlayback(round)) {
+              beginLiveRound(round, "Round live. Spotify started after a delayed response.");
+              return;
+            }
+
+            setStatus("Retrying host Spotify playback...");
+            await wait(600);
+            const retryResponse = await playTrackUri(spotifyToken, round.trackUri, spotifyPlayer.id);
+
+            if (retryResponse.ok || (await waitForHostPlayback(round))) {
+              beginLiveRound(round, "Round live. Host playback recovered after retry.");
+              return;
+            }
+
+            setStatus(`Spotify could not confirm playback (${retryResponse.status}).`);
+            startedRoundIdRef.current = null;
+            return;
+          }
+
+          setStatus(`Spotify could not start playback (${response.status}).`);
+          startedRoundIdRef.current = null;
+          return;
+        } catch (error) {
+          console.error("Error starting synchronized playback:", error);
+          setStatus("Spotify request failed. Checking whether playback started...");
+
+          if (await waitForHostPlayback(round)) {
+            beginLiveRound(round, "Round live. Spotify started after a delayed response.");
+            return;
+          }
+
+          setStatus("Could not start synchronized playback.");
+          startedRoundIdRef.current = null;
+          return;
+        }
       }
+
+      beginLiveRound(round, "Round live. Listen to the host speaker and guess fast.");
     }, Math.max(0, round.startsAtEpoch - Date.now()));
+  };
+
+  const retryHostPlayback = () => {
+    const round = sessionRef.current?.currentRound;
+    if (!round || !isHostRef.current) return;
+
+    startedRoundIdRef.current = null;
+    scheduleRoundPlayback({
+      ...round,
+      startsAtEpoch: Date.now(),
+    });
   };
 
   useEffect(() => {
@@ -1678,6 +1799,8 @@ export default function QuizPage() {
       return;
     }
 
+    await activateHostPlaybackElement();
+
     const usedTrackIds = new Set(currentSession.rounds.map((round) => round.trackId));
     const availableTrackIds = currentCatalog.trackIds.filter((trackId) => !usedTrackIds.has(trackId));
     const pool = availableTrackIds.length > 0 ? availableTrackIds : currentCatalog.trackIds;
@@ -1705,7 +1828,10 @@ export default function QuizPage() {
   };
 
   const setReadyForRound = () => {
-    if (!localPlayer || !playerInfo?.ready || isRunning || phase === "countdown") return;
+    if (!canToggleReady) return;
+    if (isHost) {
+      activateHostPlaybackElement();
+    }
     const nextRoundNumber = (sessionRef.current?.rounds.length || 0) + 1;
     if ((localPlayer.joinRoundNumber || 1) > nextRoundNumber) {
       setStatus("Song already in progress. You will join the next round.");
@@ -1743,7 +1869,7 @@ export default function QuizPage() {
   };
 
   useEffect(() => {
-    if (!autoReady || !localPlayer || !playerInfo?.ready || localPlayerReady) return;
+    if (!autoReady || !localPlayer || !canToggleReady || localPlayerReady) return;
     if (isRunning) return;
     const currentPhase = sessionRef.current?.phase || phase;
     if (currentPhase !== "lobby" && currentPhase !== "round-ended") return;
@@ -1752,7 +1878,7 @@ export default function QuizPage() {
     if ((localPlayer.joinRoundNumber || 1) > nextRoundNumber) return;
 
     setReadyForRound();
-  }, [autoReady, isRunning, localPlayer, localPlayerReady, phase, playerInfo?.ready, session?.phase, session?.rounds.length]);
+  }, [autoReady, canToggleReady, isRunning, localPlayer, localPlayerReady, phase, session?.phase, session?.rounds.length]);
 
   const fadeOutRound = (fadeMs = 900, requestId = null) => {
     roundStopRequestedAtRef.current = Date.now();
@@ -1981,6 +2107,31 @@ export default function QuizPage() {
 
     console.debug("[Songle quiz] applying local host claim", claim);
     applyHostClaim(claim);
+  };
+
+  const handleHostPlaybackState = (nextState) => {
+    hostPlaybackRuntimeRef.current = {
+      ...hostPlaybackRuntimeRef.current,
+      player: nextState.player || hostPlaybackRuntimeRef.current?.player,
+      getCurrentState: nextState.getCurrentState || hostPlaybackRuntimeRef.current?.getCurrentState,
+      activateElement: nextState.activateElement || hostPlaybackRuntimeRef.current?.activateElement,
+    };
+    hostPlaybackStateRef.current = {
+      ...hostPlaybackStateRef.current,
+      ...nextState,
+    };
+
+    if (nextState.ready === false && isHostRef.current) {
+      setPlayerInfo((previousInfo) =>
+        previousInfo
+          ? {
+              ...previousInfo,
+              ready: false,
+              error: nextState.lastError || previousInfo.error,
+            }
+          : previousInfo
+      );
+    }
   };
 
   const playerIsReadyHandler = (playerID) => {
@@ -2265,21 +2416,235 @@ export default function QuizPage() {
     </div>
   );
 
-  if (!isLoggedIn) {
-    return (
-      <SiteShell>
-        <section className="grid min-h-[calc(100vh-145px)] place-items-center px-6 py-10 sm:px-10">
-          <Login next={router.asPath || "/quiz"} />
+  const previousRoundsPanel = session && (
+    <Card className="songle-card-frame songle-card-main">
+      <CardHeader>
+        <CardTitle className="text-2xl">Previous Rounds</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="max-h-[420px] overflow-y-auto pr-2">
+          <div className="flex flex-col gap-4">
+          {[...session.rounds].reverse().map((round) => (
+            <div key={round.id} className="songle-inner-panel p-3">
+              <h2 className="font-bold">Round {round.roundNumber}</h2>
+              <ul className="mt-2 flex flex-col gap-2 text-sm">
+                {round.claims.length > 0 ? (
+                  round.claims.flatMap((claim) => {
+                    const rows = [
+                      <li
+                        key={`${claim.playerId}-${claim.field}`}
+                        className={`songle-row-frame grid items-center gap-2 p-2 sm:grid-cols-[minmax(0,1fr)_72px_72px] ${
+                          highlightedClaims[`${round.id}-${claim.playerId}-${claim.field}`]
+                            ? "songle-flash-row"
+                            : ""
+                        }`}
+                      >
+                        <span className="min-w-0 truncate">
+                          <span className="font-bold">
+                            {playerNameById[claim.playerId] || claim.playerName}
+                          </span>{" "}
+                          guessed {claim.field}
+                        </span>
+                        <span className="text-right">{formatTime(claim.elapsedMs)}</span>
+                        <span className="text-right">+{claim.basePoints || claim.points}</span>
+                      </li>,
+                    ];
+
+                    if (claim.bonusPoints) {
+                      rows.push(
+                        <li
+                          key={`${claim.playerId}-${claim.field}-bonus`}
+                          className="songle-row-frame grid items-center gap-2 p-2 sm:grid-cols-[minmax(0,1fr)_72px_72px]"
+                        >
+                          <span className="min-w-0 truncate">
+                            <span className="font-bold">
+                              {playerNameById[claim.playerId] || claim.playerName}
+                            </span>{" "}
+                            completed both answers bonus
+                          </span>
+                          <span className="text-right">bonus</span>
+                          <span className="text-right">+{claim.bonusPoints}</span>
+                        </li>
+                      );
+                    }
+
+                    return rows;
+                  })
+                ) : (
+                  <li>No correct guesses yet.</li>
+                )}
+              </ul>
+            </div>
+          ))}
+          {session.rounds.length === 0 && <p>No rounds played yet.</p>}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+
+  const mobileStatusPanel = (
+    <div className="songle-mobile-status grid gap-3 sm:hidden">
+      <div className="grid grid-cols-2 gap-3">
+        <div className="songle-inner-panel min-w-0 p-3 text-center">
+          <p className="text-xs font-bold uppercase text-muted-foreground">Time</p>
+          <p className="mt-1 text-3xl font-bold">{formatTime(elapsedTime)}</p>
+        </div>
+        <div className="songle-inner-panel min-w-0 p-3 text-center">
+          <p className="text-xs font-bold uppercase text-muted-foreground">Ready</p>
+          <p className="mt-1 text-lg font-bold">{readySummary || "Ready 0/0"}</p>
+        </div>
+      </div>
+      <div className="songle-inner-panel min-w-0 p-3 text-sm">
+        <p className="font-bold">{phase === "round-live" ? "Round live" : phase === "countdown" ? "Starting round" : "Party Quiz"}</p>
+        <p className="mt-1 break-words text-muted-foreground">{status || "Listen to the host speaker and get ready."}</p>
+      </div>
+    </div>
+  );
+
+  const mobileMenuButton = session && (
+    <Button className="w-full xl:hidden" onClick={() => setIsMobilePanelOpen(true)}>
+      Session
+    </Button>
+  );
+
+  const mobileActionPanel = session && (
+    <div className="grid gap-3 sm:hidden">
+      <label className="songle-inner-panel flex min-h-12 w-full items-center justify-center gap-2 px-3 text-sm font-bold">
+        <input
+          type="checkbox"
+          checked={autoReady}
+          onChange={(event) => setAutoReady(event.target.checked)}
+        />
+        Auto-ready
+      </label>
+      <div className="grid grid-cols-2 gap-3">
+        <Button
+          className="w-full"
+          onClick={setReadyForRound}
+          disabled={!canToggleReady}
+        >
+          {readyButtonLabel}
+        </Button>
+        <Button
+          className="w-full"
+          onClick={requestStartRound}
+          disabled={
+            !catalog ||
+            !localPlaybackReady ||
+            !allReady ||
+            isRunning ||
+            phase === "countdown"
+          }
+        >
+          Start
+        </Button>
+      </div>
+      {isHost && session?.currentRound && phase === "countdown" && !isRunning && (
+        <div className="grid gap-3">
+          <Button className="w-full" onClick={retryHostPlayback} disabled={!localPlaybackReady}>
+            Retry Host Playback
+          </Button>
+          <Button className="w-full" onClick={recoverHostPlayback}>
+            Mark Live If Audible
+          </Button>
+        </div>
+      )}
+      {mobileMenuButton}
+    </div>
+  );
+
+  const partySetupPanel = !session && (
+    <div className="songle-party-setup grid min-w-0 gap-4">
+      <label className="flex min-w-0 flex-col gap-2 text-sm font-bold">
+        Display Name
+        <input
+          className="min-w-0 w-full border px-3 py-2 font-normal"
+          value={hostName}
+          onChange={(event) => {
+            const nextName = event.target.value;
+            setHostName(nextName);
+            localStorage.setItem("songle-party-display-name", nextName);
+          }}
+          placeholder="Your name"
+        />
+      </label>
+
+      <div className="grid min-w-0 gap-4 md:grid-cols-2">
+        <section className="songle-inner-panel grid min-w-0 gap-3 p-3">
+          <div className="min-w-0">
+            <h2 className="text-base font-bold">Join Room</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Enter the room ID from the host.
+            </p>
+          </div>
+          <form
+            className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_auto]"
+            onSubmit={(event) => {
+              event.preventDefault();
+              joinRoom();
+            }}
+          >
+            <input
+              className="min-w-0 w-full border px-3 py-2"
+              value={joinRoomId}
+              onChange={(event) => setJoinRoomId(event.target.value)}
+              placeholder="Room ID"
+            />
+            <Button className="w-full sm:w-auto">Join Room</Button>
+          </form>
         </section>
-      </SiteShell>
-    );
-  }
+
+        <section className="songle-inner-panel grid min-w-0 gap-3 p-3">
+          <div className="min-w-0">
+            <h2 className="text-base font-bold">Create Room</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Host the speaker playback from this device.
+            </p>
+          </div>
+          {PLAYLIST_OPTIONS.length > 1 && (
+            <Select
+              value={playlistId}
+              disabled={!isLoggedIn}
+              onValueChange={setPlaylistId}
+            >
+              <SelectTrigger className="w-full min-w-0">
+                <SelectValue placeholder="Choose playlist" />
+              </SelectTrigger>
+              <SelectContent>
+                {PLAYLIST_OPTIONS.map((playlist) => (
+                  <SelectItem key={playlist.id} value={playlist.id}>
+                    {playlist.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          <Button
+            className="w-full"
+            onClick={fetchCatalog}
+            disabled={isLoadingCatalog || !playlistId || !isLoggedIn}
+          >
+            {isLoadingCatalog ? "Loading..." : "Create Room"}
+          </Button>
+          {!isLoggedIn && (
+            <Button
+              className="w-full"
+              onClick={() => window.location.assign(`/api/login?next=${encodeURIComponent(PARTY_QUIZ_PATH)}`)}
+            >
+              Spotify Login
+            </Button>
+          )}
+        </section>
+      </div>
+    </div>
+  );
 
   return (
     <TooltipProvider delayDuration={250}>
     <SiteShell userData={userData} onLogout={logout}>
-    <main className="p-6 sm:p-10">
-      <div className="mx-auto flex max-w-[1800px] flex-col gap-6">
+    <main className="px-3 py-4 sm:p-10">
+      <div className="mx-auto flex w-full max-w-[1800px] min-w-0 flex-col gap-4 sm:gap-6">
         {uiEvents.length > 0 && (
           <div className="fixed right-4 top-4 z-50 flex w-[min(340px,calc(100vw-2rem))] flex-col gap-2">
             {uiEvents.map((event) => (
@@ -2290,10 +2655,10 @@ export default function QuizPage() {
           </div>
         )}
 
-        <section className="grid gap-6 xl:grid-cols-[minmax(280px,0.72fr)_minmax(620px,1.35fr)_minmax(300px,0.78fr)]">
+        <section className="grid min-w-0 gap-4 sm:gap-6 xl:grid-cols-[minmax(280px,0.72fr)_minmax(620px,1.35fr)_minmax(300px,0.78fr)]">
           <div className="hidden xl:block">{playersPanel}</div>
           <div className="flex min-w-0 flex-col gap-6">
-            <Card className={`songle-card-frame songle-card-main relative overflow-hidden ${isRoundCompleteEffect ? "songle-round-complete" : ""}`}>
+            <Card className={`songle-party-main-card songle-card-frame songle-card-main relative min-w-0 overflow-hidden ${isRoundCompleteEffect ? "songle-round-complete" : ""}`}>
               {phase === "countdown" && (isSynchronizingRound || countdownValue) && (
                 <div className="absolute inset-0 z-20 grid place-items-center bg-background/75 backdrop-blur-sm">
                   <div className="songle-card-frame grid min-h-48 min-w-64 place-items-center bg-background px-10 py-8 text-center">
@@ -2311,68 +2676,31 @@ export default function QuizPage() {
                   </div>
                 </div>
               )}
-              <CardHeader>
-                <CardTitle className="text-2xl">Music Quiz</CardTitle>
+              <CardHeader className="px-4 py-4 sm:px-6">
+                <CardTitle className="text-xl sm:text-2xl">Party Quiz</CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  {isHost
+                    ? "This device plays the music. Everyone, including you, guesses from the same countdown."
+                    : "Listen to the host speaker, then guess from this device when the countdown ends."}
+                </p>
               </CardHeader>
-              <CardContent className="flex flex-col gap-5">
-                {!session && !cachedSnapshot && (
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="flex flex-col gap-3">
-                      {PLAYLIST_OPTIONS.length > 1 && (
-                        <Select
-                          value={playlistId}
-                          onValueChange={setPlaylistId}
-                        >
-                          <SelectTrigger className="w-full min-w-0">
-                            <SelectValue placeholder="Choose playlist" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {PLAYLIST_OPTIONS.map((playlist) => (
-                              <SelectItem key={playlist.id} value={playlist.id}>
-                                {playlist.name}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      )}
-                      <Button onClick={fetchCatalog} disabled={isLoadingCatalog || !playlistId}>
-                        {isLoadingCatalog ? "Loading..." : "Create Session"}
-                      </Button>
-                    </div>
-                    <form
-                      className="flex gap-2"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        joinRoom();
-                      }}
-                    >
-                      <input
-                        className="min-w-0 flex-1 border px-3 py-2"
-                        value={joinRoomId}
-                        onChange={(event) => setJoinRoomId(event.target.value)}
-                        placeholder="Enter room ID"
-                      />
-                      <Button>Join</Button>
-                    </form>
-                  </div>
-                )}
+              <CardContent className="flex min-w-0 flex-col gap-4 px-4 pb-4 sm:gap-5 sm:px-6 sm:pb-6">
+                {partySetupPanel}
 
-                {cachedSnapshot && !session && (
-                  <Button onClick={() => restoreSnapshot(cachedSnapshot)}>
-                    Resume Cached Room
-                  </Button>
-                )}
-
-                {catalog && (
+                {catalog && isHost && (
                   <Player
                     token={token}
                     isReady={playerIsReadyHandler}
+                    onPlaybackState={handleHostPlaybackState}
                     stopPlaying={stopPlaying}
                     stopPlaybackRequest={stopPlaybackRequest}
                   />
                 )}
 
-                <div className="grid items-stretch gap-3 md:grid-cols-[auto_auto_auto_minmax(120px,160px)_minmax(120px,160px)]">
+                {session && mobileStatusPanel}
+                {mobileActionPanel}
+
+                <div className="hidden items-stretch gap-3 sm:grid sm:grid-cols-2 lg:grid-cols-[repeat(auto-fit,minmax(128px,1fr))]">
                   <label className="songle-inner-panel flex min-h-12 items-center justify-center gap-2 px-3 text-sm font-bold">
                     <input
                       type="checkbox"
@@ -2383,7 +2711,7 @@ export default function QuizPage() {
                   </label>
                   <Button
                     onClick={setReadyForRound}
-                    disabled={!catalog || !playerInfo?.ready || isRunning || phase === "countdown"}
+                    disabled={!canToggleReady}
                   >
                     {readyButtonLabel}
                   </Button>
@@ -2391,7 +2719,7 @@ export default function QuizPage() {
                     onClick={requestStartRound}
                     disabled={
                       !catalog ||
-                      !playerInfo?.ready ||
+                      !localPlaybackReady ||
                       !allReady ||
                       isRunning ||
                       phase === "countdown"
@@ -2399,6 +2727,24 @@ export default function QuizPage() {
                   >
                     Start Round
                   </Button>
+                  {session && (
+                    <Button
+                      className="xl:hidden"
+                      onClick={() => setIsMobilePanelOpen(true)}
+                    >
+                      Session
+                    </Button>
+                  )}
+                  {isHost && session?.currentRound && phase === "countdown" && !isRunning && (
+                    <>
+                      <Button onClick={retryHostPlayback} disabled={!localPlaybackReady}>
+                        Retry Host Playback
+                      </Button>
+                      <Button onClick={recoverHostPlayback}>
+                        Mark Live If Audible
+                      </Button>
+                    </>
+                  )}
                   <div className="songle-inner-panel flex min-h-12 items-center justify-center px-3">
                     <span className="text-3xl font-bold">{formatTime(elapsedTime)}</span>
                   </div>
@@ -2408,9 +2754,9 @@ export default function QuizPage() {
                 </div>
 
                 {currentTrack && (
-                  <div className="grid gap-4 md:grid-cols-2">
+                  <div className="grid min-w-0 gap-4 md:grid-cols-2">
                     <div
-                      className={`songle-guess-panel relative p-3 ${
+                      className={`songle-guess-panel relative min-w-0 p-3 ${
                         songSolved ? "songle-solved-song" : ""
                       } ${correctGuessField === "song" ? "songle-correct-guess" : ""}`}
                     >
@@ -2435,7 +2781,7 @@ export default function QuizPage() {
                       )}
                     </div>
                     <div
-                      className={`songle-guess-panel relative p-3 ${
+                      className={`songle-guess-panel relative min-w-0 p-3 ${
                         artistSolved ? "songle-solved-artist" : ""
                       } ${correctGuessField === "artist" ? "songle-correct-guess" : ""}`}
                     >
@@ -2466,85 +2812,11 @@ export default function QuizPage() {
               </CardContent>
             </Card>
 
-            {session && (
-              <Card className="songle-card-frame songle-card-main">
-                <CardHeader>
-                  <CardTitle className="text-2xl">Previous Rounds</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="max-h-[420px] overflow-y-auto pr-2">
-                    <div className="flex flex-col gap-4">
-                    {[...session.rounds].reverse().map((round) => (
-                      <div key={round.id} className="songle-inner-panel p-3">
-                        <h2 className="font-bold">Round {round.roundNumber}</h2>
-                        <ul className="mt-2 flex flex-col gap-2 text-sm">
-                          {round.claims.length > 0 ? (
-                            round.claims.flatMap((claim) => {
-                              const rows = [
-                                <li
-                                  key={`${claim.playerId}-${claim.field}`}
-                                  className={`songle-row-frame grid items-center gap-2 p-2 sm:grid-cols-[minmax(0,1fr)_72px_72px] ${
-                                    highlightedClaims[`${round.id}-${claim.playerId}-${claim.field}`]
-                                      ? "songle-flash-row"
-                                      : ""
-                                  }`}
-                                >
-                                  <span className="min-w-0 truncate">
-                                    <span className="font-bold">
-                                      {playerNameById[claim.playerId] || claim.playerName}
-                                    </span>{" "}
-                                    guessed {claim.field}
-                                  </span>
-                                  <span className="text-right">{formatTime(claim.elapsedMs)}</span>
-                                  <span className="text-right">+{claim.basePoints || claim.points}</span>
-                                </li>,
-                              ];
-
-                              if (claim.bonusPoints) {
-                                rows.push(
-                                  <li
-                                    key={`${claim.playerId}-${claim.field}-bonus`}
-                                    className="songle-row-frame grid items-center gap-2 p-2 sm:grid-cols-[minmax(0,1fr)_72px_72px]"
-                                  >
-                                    <span className="min-w-0 truncate">
-                                      <span className="font-bold">
-                                        {playerNameById[claim.playerId] || claim.playerName}
-                                      </span>{" "}
-                                      completed both answers bonus
-                                    </span>
-                                    <span className="text-right">bonus</span>
-                                    <span className="text-right">+{claim.bonusPoints}</span>
-                                  </li>
-                                );
-                              }
-
-                              return rows;
-                            })
-                          ) : (
-                            <li>No correct guesses yet.</li>
-                          )}
-                        </ul>
-                      </div>
-                    ))}
-                    {session.rounds.length === 0 && <p>No rounds played yet.</p>}
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            )}
+            <div className="hidden sm:block">{previousRoundsPanel}</div>
           </div>
 
           <div className="hidden xl:block">{sessionPanel}</div>
         </section>
-        {session && (
-          <Button
-            className="fixed bottom-4 right-4 z-40 xl:hidden"
-            onClick={() => setIsMobilePanelOpen(true)}
-          >
-            <Menu className="h-4 w-4" />
-            Session
-          </Button>
-        )}
         {isMobilePanelOpen && (
           <div className="fixed inset-0 z-50 xl:hidden">
             <button
@@ -2553,7 +2825,7 @@ export default function QuizPage() {
               className="absolute inset-0 bg-black/50"
               onClick={() => setIsMobilePanelOpen(false)}
             />
-            <aside className="absolute right-0 top-0 h-full w-[min(92vw,420px)] overflow-y-auto border-l bg-background p-4 shadow-xl">
+            <aside className="absolute right-0 top-0 h-full w-full max-w-[420px] overflow-x-hidden overflow-y-auto border-l bg-background p-3 shadow-xl sm:p-4">
               <div className="mb-4 flex items-center justify-between gap-3">
                 <h2 className="text-xl font-bold">Session</h2>
                 <Button onClick={() => setIsMobilePanelOpen(false)}>
@@ -2561,6 +2833,9 @@ export default function QuizPage() {
                 </Button>
               </div>
               {sidePanel}
+              {previousRoundsPanel && (
+                <div className="mt-6 sm:hidden">{previousRoundsPanel}</div>
+              )}
             </aside>
           </div>
         )}

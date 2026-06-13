@@ -8,12 +8,13 @@ export function createRoomId() {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export function createSignalingClient({ baseUrl, roomId, peerId, name, role }) {
+export function createSignalingClient({ baseUrl, roomId, peerId, name, role, canHost = false }) {
   const url = new URL(`/room/${encodeURIComponent(roomId)}`, baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("peerId", peerId);
   url.searchParams.set("name", name);
   url.searchParams.set("role", role);
+  url.searchParams.set("canHost", canHost ? "true" : "false");
 
   const socket = new WebSocket(url.toString());
   const listeners = new Map();
