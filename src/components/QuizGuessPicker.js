@@ -201,7 +201,7 @@ const QuizGuessPicker = React.forwardRef(function QuizGuessPicker({
           side={isMobile ? "top" : "bottom"}
           align="start"
           sideOffset={isMobile ? 10 : 4}
-          avoidCollisions
+          avoidCollisions={false}
         >
           <Command>
             <CommandInput

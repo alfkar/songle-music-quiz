@@ -22,11 +22,13 @@ export function compactSpotifyTrack(track) {
   };
 }
 
-export function buildQuizCatalog({ playlistId, playlistName, playlistUri, snapshotId, tracks }) {
-  const compactTracks = tracks
-    .filter((track) => track?.id && track?.uri && track?.name)
-    .map(compactSpotifyTrack);
-
+export function buildCatalogFromCompactTracks({
+  playlistId,
+  playlistName,
+  playlistUri = "",
+  snapshotId,
+  compactTracks,
+}) {
   return {
     playlistId,
     playlistName,
@@ -38,6 +40,20 @@ export function buildQuizCatalog({ playlistId, playlistName, playlistUri, snapsh
       compactTracks.map((track) => [track.id, track])
     ),
   };
+}
+
+export function buildQuizCatalog({ playlistId, playlistName, playlistUri, snapshotId, tracks }) {
+  const compactTracks = tracks
+    .filter((track) => track?.id && track?.uri && track?.name)
+    .map(compactSpotifyTrack);
+
+  return buildCatalogFromCompactTracks({
+    playlistId,
+    playlistName,
+    playlistUri,
+    snapshotId,
+    compactTracks,
+  });
 }
 
 export function getUniqueArtists(catalog) {

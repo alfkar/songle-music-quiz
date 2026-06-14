@@ -1,6 +1,6 @@
 import Head from "next/head";
 import { useRouter } from "next/router";
-import { CalendarDays, Speaker, Users } from "lucide-react";
+import { CalendarDays, Globe, Speaker, Users } from "lucide-react";
 
 import SiteShell from "@/components/SiteShell";
 import { Button } from "@/components/ui/8bit/button";
@@ -23,7 +23,7 @@ export default function Home() {
           </p>
         </div>
 
-        <div className="grid gap-6 md:grid-cols-3">
+        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
           <Card className="songle-card-frame songle-card-main">
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-2xl">
@@ -71,6 +71,23 @@ export default function Home() {
               </p>
               <Button onClick={() => router.push("/party-quiz")} className="w-full">
                 Open Party Quiz
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card className="songle-card-frame songle-card-main">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-2xl">
+                <Globe className="h-5 w-5" />
+                Online Quiz
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="flex min-h-52 flex-col justify-between gap-6">
+              <p className="text-sm text-muted-foreground">
+                No Spotify login and no player limit. Guess 30-second clips with friends anywhere.
+              </p>
+              <Button onClick={() => router.push("/online-quiz")} className="w-full">
+                Open Online Quiz
               </Button>
             </CardContent>
           </Card>
