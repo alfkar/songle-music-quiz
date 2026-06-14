@@ -1,2 +1,3 @@
 @echo off
-node "%~dp0dev.js"
+node "%~dp0dev.cjs"
+pause
