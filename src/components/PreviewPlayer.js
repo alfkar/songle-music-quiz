@@ -58,6 +58,11 @@ const PreviewPlayer = forwardRef(function PreviewPlayer(
       const audio = audioRef.current;
       if (!audio) return;
 
+      // A playable src is required for play() to grant autoplay permission to
+      // this element. Without one the promise rejects silently and the first
+      // real song is still blocked by the browser's autoplay policy.
+      audio.src =
+        "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
       audio.muted = true;
       Promise.resolve(audio.play())
         .then(() => {
@@ -67,6 +72,7 @@ const PreviewPlayer = forwardRef(function PreviewPlayer(
         .catch(() => {})
         .finally(() => {
           audio.muted = false;
+          audio.src = "";
         });
     },
   }));

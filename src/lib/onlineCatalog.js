@@ -46,7 +46,7 @@ export const ONLINE_SEEDS = {
     { title: "Stayin' Alive", artist: "Bee Gees" },
     { title: "Sweet Home Alabama", artist: "Lynyrd Skynyrd" },
     { title: "Dream On", artist: "Aerosmith" },
-    { title: "Imagine", artist: "John Lennon" },
+    { title: "Piano Man", artist: "Billy Joel" },
     { title: "Go Your Own Way", artist: "Fleetwood Mac" },
     { title: "Hot Stuff", artist: "Donna Summer" },
     { title: "Heart of Gold", artist: "Neil Young" },

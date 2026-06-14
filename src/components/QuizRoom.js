@@ -222,13 +222,13 @@ function translateCountdownSnapshotToLocalClock(snapshot) {
   };
 }
 
-export default function QuizRoom({ mode = "spotify" }) {
+export default function QuizRoom({ mode = "spotify", initialName, initialRoomId }) {
   const router = useRouter();
   const config = MODE_CONFIG[mode] || MODE_CONFIG.spotify;
   const isOnline = mode === "online";
   const playlistOptions = config.playlistOptions;
   const previewPlayerRef = useRef(null);
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [isLoggedIn, setIsLoggedIn] = useState(Boolean(initialName));
   const [userData, setUserData] = useState(null);
   const [token, setToken] = useState("");
   const [roomId, setRoomId] = useState("");
@@ -243,7 +243,7 @@ export default function QuizRoom({ mode = "spotify" }) {
   const [playlistName, setPlaylistName] = useState("");
   const [playlistVoteId, setPlaylistVoteId] = useState("");
   const [joinRoomId, setJoinRoomId] = useState("");
-  const [hostName, setHostName] = useState("Host");
+  const [hostName, setHostName] = useState(initialName || "Host");
   const [nameDraft, setNameDraft] = useState("");
   const [playerInfo, setPlayerInfo] = useState(null);
   const [catalog, setCatalog] = useState(null);
@@ -279,6 +279,8 @@ export default function QuizRoom({ mode = "spotify" }) {
   const startedRoundIdRef = useRef(null);
   const countdownIntervalRef = useRef(null);
   const countdownTimeoutRef = useRef(null);
+  const roundEndTimeoutRef = useRef(null);
+  const skipRoundRef = useRef(null);
   const signalingRef = useRef(null);
   const webRtcRef = useRef(null);
   const sessionRef = useRef(null);
@@ -313,6 +315,10 @@ export default function QuizRoom({ mode = "spotify" }) {
   }, []);
 
   useEffect(() => {
+    if (initialRoomId) {
+      setRoomId(initialRoomId);
+      return;
+    }
     if (!router.isReady) return;
 
     const queryRoomId = typeof router.query.room === "string" ? router.query.room : "";
@@ -328,7 +334,7 @@ export default function QuizRoom({ mode = "spotify" }) {
 
     setCachedSnapshot(snapshot);
     setStatus(`Cached room found. Revision ${snapshot.revision} can be resumed.`);
-  }, [router.isReady, router.query.room]);
+  }, [router.isReady, router.query.room, initialRoomId]);
 
   useEffect(() => {
     if (isOnline) {
@@ -363,6 +369,7 @@ export default function QuizRoom({ mode = "spotify" }) {
       if (timerRef.current) clearInterval(timerRef.current);
       if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
       if (countdownTimeoutRef.current) clearTimeout(countdownTimeoutRef.current);
+      if (roundEndTimeoutRef.current) clearTimeout(roundEndTimeoutRef.current);
       webRtcRef.current?.close();
       signalingRef.current?.close();
     };
@@ -1097,6 +1104,14 @@ export default function QuizRoom({ mode = "spotify" }) {
     if (message.type === "session:start-request" && isHostRef.current) {
       startRound();
     }
+
+    if (message.type === "session:ended" && !isHostRef.current) {
+      stopTimer({ stopPlayback: true });
+      webRtcRef.current?.close();
+      signalingRef.current?.close();
+      setStatus("The host ended the session.");
+      setPhase("session-ended");
+    }
   };
 
   const currentTrack = useMemo(() => {
@@ -1461,6 +1476,10 @@ export default function QuizRoom({ mode = "spotify" }) {
     client.on("session:start-request", (message) => {
       handleSessionMessage(message, message.from);
     });
+
+    client.on("session:ended", (message) => {
+      handleSessionMessage(message, message.from);
+    });
   };
 
   useEffect(() => {
@@ -1555,7 +1574,14 @@ export default function QuizRoom({ mode = "spotify" }) {
       });
       setPhase("lobby");
       router.replace(`${config.invitePath}?room=${nextRoomId}`, undefined, { shallow: true });
-      setStatus(`Loaded ${nextCatalog.tracks.length} songs from the host playlist.`);
+      const playableCount = isOnline
+        ? nextCatalog.tracks.filter((t) => t.previewUrl).length
+        : nextCatalog.tracks.length;
+      if (playableCount === 0) {
+        setStatus("Warning: no playable previews found. iTunes may be unavailable.");
+      } else {
+        setStatus(`Loaded ${playableCount} songs from the host playlist.`);
+      }
     } catch (error) {
       console.error("Error creating quiz session:", error);
       setStatus(error.message || "Could not create the quiz session. Check the playlist ID and Spotify login.");
@@ -1577,7 +1603,9 @@ export default function QuizRoom({ mode = "spotify" }) {
 
   const stopTimer = ({ stopPlayback = true, fadeMs = 900 } = {}) => {
     if (timerRef.current) clearInterval(timerRef.current);
+    if (roundEndTimeoutRef.current) clearTimeout(roundEndTimeoutRef.current);
     timerRef.current = null;
+    roundEndTimeoutRef.current = null;
     setIsRunning(false);
     if (stopPlayback) {
       fadeOutRound(fadeMs);
@@ -1630,19 +1658,34 @@ export default function QuizRoom({ mode = "spotify" }) {
       if (isOnline) {
         const track = catalogRef.current?.tracksById[round.trackId];
         if (!track?.previewUrl) {
-          setStatus("This song has no preview clip available.");
+          if (isHostRef.current) {
+            skipRoundRef.current?.();
+          } else {
+            setPhase("lobby");
+            setStatus("Song has no preview. Waiting for host.");
+          }
           return;
         }
 
         const started = await previewPlayerRef.current?.play(track.previewUrl);
         if (!started) {
-          setStatus("Could not start preview playback in this browser.");
+          if (isHostRef.current) {
+            skipRoundRef.current?.();
+          } else {
+            setPhase("lobby");
+            setStatus("Playback blocked. Waiting for host.");
+          }
           return;
         }
 
         startTimer();
         setPhase("round-live");
         setStatus("Round live. Guess as fast as you can.");
+        if (isHostRef.current) {
+          roundEndTimeoutRef.current = setTimeout(() => {
+            if (phaseRef.current === "round-live") skipRoundRef.current?.();
+          }, 30000);
+        }
         return;
       }
 
@@ -1700,7 +1743,31 @@ export default function QuizRoom({ mode = "spotify" }) {
 
     const usedTrackIds = new Set(currentSession.rounds.map((round) => round.trackId));
     const availableTrackIds = currentCatalog.trackIds.filter((trackId) => !usedTrackIds.has(trackId));
-    const pool = availableTrackIds.length > 0 ? availableTrackIds : currentCatalog.trackIds;
+    const hasPreview = (trackId) => !isOnline || Boolean(currentCatalog.tracksById[trackId]?.previewUrl);
+    const playableAvailable = availableTrackIds.filter(hasPreview);
+    let poolSource = "fresh";
+    let pool = playableAvailable;
+    if (!pool.length && availableTrackIds.length > 0) {
+      pool = availableTrackIds;
+      poolSource = "fresh-no-preview";
+    }
+    if (!pool.length) {
+      pool = currentCatalog.trackIds.filter(hasPreview);
+      poolSource = "recycled";
+    }
+    if (!pool.length) {
+      pool = currentCatalog.trackIds;
+      poolSource = "recycled-no-preview";
+    }
+    if (!pool.length) {
+      setStatus("No playable songs available in this catalog.");
+      setPhase("lobby");
+      return;
+    }
+    if (availableTrackIds.length === 0) {
+      pushUiEvent("All songs played — cycling back through the playlist.");
+    }
+    console.debug("[Songle] track pool:", poolSource, pool.length, "tracks");
     const trackId = pool[Math.floor(Math.random() * pool.length)];
     const track = currentCatalog.tracksById[trackId];
     const round = createRound({
@@ -1786,6 +1853,51 @@ export default function QuizRoom({ mode = "spotify" }) {
           : `${Date.now()}-${Math.random()}`),
       fadeMs,
     });
+  };
+
+  const skipRound = () => {
+    if (!isHostRef.current) return;
+
+    stopTimer({ stopPlayback: true });
+    setPendingReady(null);
+    setPendingReadyRoundNumber(null);
+    setPhase("round-ended");
+    setStatus("Song skipped. Ready up for the next song.");
+
+    setSession((previousSession) => {
+      if (!previousSession) return previousSession;
+      const skippedSession = {
+        ...resetPlayerReadiness(previousSession),
+        phase: "round-ended",
+      };
+      sendSessionMessage({
+        type: "session:snapshot",
+        reliable: true,
+        revision: snapshotRevisionRef.current + 1,
+        state: createSnapshot({
+          roomId,
+          peerId,
+          revision: snapshotRevisionRef.current + 1,
+          session: skippedSession,
+          catalog: catalogRef.current,
+          localPlayer: localPlayerRef.current,
+          phase: "round-ended",
+        }),
+      });
+      return skippedSession;
+    });
+  };
+  skipRoundRef.current = skipRound;
+
+  const endSession = () => {
+    sendSessionMessage({
+      type: "session:ended",
+      reliable: true,
+    });
+    stopTimer({ stopPlayback: true });
+    webRtcRef.current?.close();
+    signalingRef.current?.close();
+    router.push("/");
   };
 
   const requestStartRound = () => {
@@ -2171,7 +2283,19 @@ export default function QuizRoom({ mode = "spotify" }) {
                 {hasCopiedInvite ? "Copied" : "Invite Friends - Copy Link"}
               </Button>
             )}
-            {signalStatus && <p className="text-sm">{signalStatus}</p>}
+            {isHost && session && (
+              <Button
+                className="w-full border-red-600 text-red-600 hover:bg-red-600 hover:text-white"
+                onClick={endSession}
+              >
+                End Session
+              </Button>
+            )}
+            {signalStatus && (
+              <p className={`text-sm ${!SIGNALING_URL ? "font-bold text-yellow-600" : ""}`}>
+                {signalStatus}
+              </p>
+            )}
           </CardContent>
         </Card>
     </div>
@@ -2462,12 +2586,18 @@ export default function QuizRoom({ mode = "spotify" }) {
                     />
                     Auto-ready
                   </label>
-                  <Button
-                    onClick={setReadyForRound}
-                    disabled={!catalog || !playerInfo?.ready || isRunning || phase === "countdown"}
-                  >
-                    {readyButtonLabel}
-                  </Button>
+                  <div className="flex flex-col items-center gap-1">
+                    <Button
+                      className="w-full"
+                      onClick={setReadyForRound}
+                      disabled={!catalog || !playerInfo?.ready || isRunning || phase === "countdown"}
+                    >
+                      {readyButtonLabel}
+                    </Button>
+                    {(localPlayer?.joinRoundNumber || 1) > ((session?.rounds.length || 0) + 1) && (
+                      <p className="text-xs text-muted-foreground">Joining next round</p>
+                    )}
+                  </div>
                   <Button
                     onClick={requestStartRound}
                     disabled={
@@ -2480,8 +2610,19 @@ export default function QuizRoom({ mode = "spotify" }) {
                   >
                     Start Round
                   </Button>
+                  {isHost && (
+                    <Button
+                      onClick={skipRound}
+                      disabled={phase !== "round-live" && phase !== "countdown"}
+                      className="border-yellow-500 text-yellow-600 hover:bg-yellow-500 hover:text-white"
+                    >
+                      Skip Song
+                    </Button>
+                  )}
                   <div className="songle-inner-panel flex min-h-12 items-center justify-center px-3">
-                    <span className="text-3xl font-bold">{formatTime(elapsedTime)}</span>
+                    <span className="text-3xl font-bold">
+                      {isOnline ? formatTime(Math.max(0, 30000 - elapsedTime)) : formatTime(elapsedTime)}
+                    </span>
                   </div>
                   <div className="songle-inner-panel flex min-h-12 items-center justify-center px-3 text-center font-bold">
                     {readySummary || "Ready 0/0"}
