@@ -36,6 +36,7 @@ function pruneRoomSnapshots() {
 }
 
 export function saveRoomSnapshot(roomId, snapshot) {
+  // REQ-REC-004: Legacy full-room snapshots remain until shared quiz recovery is replaced.
   if (!roomId || typeof localStorage === "undefined") return;
 
   const savedAt = Date.now();

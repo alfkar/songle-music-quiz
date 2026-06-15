@@ -7,6 +7,7 @@
     "build": "next build",
     "dev": "next dev --turbopack",
     "start": "next start",
+    "test": "node --test",
     "lint": "next lint",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",

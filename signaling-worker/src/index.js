@@ -1,4 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
+import {
+  electHostPeer as electHostPeerFromPeers,
+  getActivePeers,
+  getHostPeer as getHostPeerFromPeers,
+  validateJoinName,
+} from "./roomState.js";
 
 function json(data, init = {}) {
   return new Response(JSON.stringify(data), {
@@ -29,10 +35,11 @@ function getPeer(ws) {
 }
 
 function getPeers(ctx) {
-  return ctx.getWebSockets().map((ws) => getPeer(ws)).filter((peer) => peer && !peer.replaced);
+  return getActivePeers(ctx.getWebSockets().map((ws) => getPeer(ws)));
 }
 
 function replaceExistingPeerSockets(ctx, peerId) {
+  // REQ-DISC-001: Reconnects from the same browser identity replace stale sockets.
   ctx.getWebSockets()
     .filter((ws) => {
       const peer = getPeer(ws);
@@ -46,21 +53,13 @@ function replaceExistingPeerSockets(ctx, peerId) {
 }
 
 function getHostPeer(ctx, exceptPeerId) {
-  return getPeers(ctx)
-    .filter((peer) => peer.peerId !== exceptPeerId)
-    .find((peer) => peer.role === "host" && peer.canHost);
+  // REQ-HOST-002: Only host-eligible connected peers can be treated as host.
+  return getHostPeerFromPeers(getPeers(ctx), exceptPeerId);
 }
 
 function electHostPeer(ctx, exceptPeerId) {
-  return getPeers(ctx)
-    .filter((peer) => peer.peerId !== exceptPeerId && peer.canHost)
-    .sort((a, b) => {
-      if (a.joinedAt !== b.joinedAt) {
-        return a.joinedAt - b.joinedAt;
-      }
-
-      return a.peerId.localeCompare(b.peerId);
-    })[0] || null;
+  // REQ-HOST-002: Host election ignores peers that cannot host this mode.
+  return electHostPeerFromPeers(getPeers(ctx), exceptPeerId);
 }
 
 function updatePeerRole(ctx, peerId, role) {
@@ -79,6 +78,29 @@ function updatePeerRole(ctx, peerId, role) {
   return updatedPeer;
 }
 
+function rejectJoin(ctx, { peerId, name, reason, message }) {
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+
+  ctx.acceptWebSocket(server);
+  server.serializeAttachment({
+    peerId,
+    name,
+    role: "rejected",
+    joinedAt: Date.now(),
+    canHost: false,
+    replaced: true,
+  });
+  send(server, {
+    type: "room:join-rejected",
+    reason,
+    message,
+  });
+  server.close(1008, message);
+
+  return new Response(null, { status: 101, webSocket: client });
+}
+
 export class Room extends DurableObject {
   async fetch(request) {
     if (request.headers.get("upgrade") !== "websocket") {
@@ -87,11 +109,24 @@ export class Room extends DurableObject {
 
     const url = new URL(request.url);
     const peerId = url.searchParams.get("peerId") || crypto.randomUUID();
-    const name = url.searchParams.get("name") || "Player";
+    const name = url.searchParams.get("name");
     const requestedRole = url.searchParams.get("role") || "player";
     const canHost =
       url.searchParams.get("canHost") === "true" ||
       (!url.searchParams.has("canHost") && requestedRole === "host");
+    // REQ-JOIN-002: Reject duplicate active names before room:welcome creates live room state.
+    const joinNameValidation = validateJoinName(getPeers(this.ctx), { peerId, name });
+
+    if (!joinNameValidation.ok) {
+      return rejectJoin(this.ctx, {
+        peerId,
+        name,
+        reason: joinNameValidation.reason,
+        message: joinNameValidation.message,
+      });
+    }
+
+    // REQ-JOIN-001: The worker accepts the validated display name for this peer.
     replaceExistingPeerSockets(this.ctx, peerId);
     const currentHost = getHostPeer(this.ctx);
     const role = !currentHost && canHost ? "host" : "player";
@@ -101,7 +136,7 @@ export class Room extends DurableObject {
     const joinedAt = Date.now();
 
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ peerId, name, role, joinedAt, canHost });
+    server.serializeAttachment({ peerId, name: joinNameValidation.name, role, joinedAt, canHost });
 
     send(server, {
       type: "room:welcome",
@@ -113,7 +148,7 @@ export class Room extends DurableObject {
     this.broadcast(
       {
         type: "peer:joined",
-        peer: { peerId, name, role, joinedAt, canHost },
+        peer: { peerId, name: joinNameValidation.name, role, joinedAt, canHost },
       },
       peerId
     );
@@ -167,6 +202,7 @@ export class Room extends DurableObject {
     }
 
     if (peer) {
+      // REQ-DISC-002: True disconnects are broadcast to active peers.
       this.broadcast({
         type: "peer:left",
         peerId: peer.peerId,
@@ -183,6 +219,7 @@ export class Room extends DurableObject {
             reason: "host-left",
           }, peer.peerId);
         } else {
+          // REQ-HOST-003: A room can become hostless when no eligible peer remains.
           this.broadcast({
             type: "host:changed",
             hostPeerId: "",

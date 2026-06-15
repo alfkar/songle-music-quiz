@@ -14,6 +14,7 @@ export function createSignalingClient({ baseUrl, roomId, peerId, name, role, can
   url.searchParams.set("peerId", peerId);
   url.searchParams.set("name", name);
   url.searchParams.set("role", role);
+  // REQ-HOST-001: Clients advertise whether this browser can host the current mode.
   url.searchParams.set("canHost", canHost ? "true" : "false");
 
   const socket = new WebSocket(url.toString());

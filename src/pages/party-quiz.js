@@ -43,6 +43,11 @@ import {
 } from "@/lib/sessionProtocol";
 import { createPeerId, createRoomId, createSignalingClient } from "@/lib/signalingClient";
 import { createWebRtcRoom } from "@/lib/webrtcRoom";
+import {
+  applyPlayerRecoveryLedger,
+  loadPlayerRecoveryLedger,
+  saveSessionRecoveryLedger,
+} from "@/lib/playerRecoveryCache";
 
 const DEFAULT_PLAYLIST_ID = process.env.NEXT_PUBLIC_SONGLE_PLAYLIST_ID || "";
 const SIGNALING_URL = process.env.NEXT_PUBLIC_SIGNALING_URL || "";
@@ -353,6 +358,7 @@ export default function QuizPage() {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
+    // REQ-REC-001: Stable browser identity lets a refresh rejoin as the same peer.
     const storedPeerId = localStorage.getItem("songle-peer-id") || createPeerId();
     localStorage.setItem("songle-peer-id", storedPeerId);
     setPeerId(storedPeerId);
@@ -513,10 +519,12 @@ export default function QuizPage() {
       phase,
     });
 
+    saveSessionRecoveryLedger(roomId, session);
     latestSnapshotRef.current = snapshot;
 
     if (!isHostRef.current) return;
 
+    // REQ-SYNC-001: Current host broadcasts snapshots so connected peers converge.
     const snapshotMessage = {
       type: "session:snapshot",
       revision: snapshot.revision,
@@ -650,6 +658,7 @@ export default function QuizPage() {
       });
       if (!claimWasAccepted) return previousSession;
 
+      // REQ-SYNC-002: The host applies accepted claims and broadcasts authoritative results.
       flashClaim(claim);
       flashScore(claim.playerId);
       if (!isRoundComplete(nextSession.currentRound)) {
@@ -1014,7 +1023,10 @@ export default function QuizPage() {
               ? false
               : message.player?.ready,
         };
-        joinedSession = upsertPlayer(previousSession, joiningPlayer);
+        joinedSession = applyPlayerRecoveryLedger(
+          upsertPlayer(previousSession, joiningPlayer),
+          message.recoveryLedger
+        );
         return joinedSession;
       });
       if (message.player?.id !== peerId) {
@@ -1176,10 +1188,6 @@ export default function QuizPage() {
   const canToggleReady = Boolean(localPlayer && catalog && !isRunning && phase !== "countdown");
   const activePlayers = useMemo(() => (session ? getActivePlayers(session) : []), [session]);
   const roundReadyPlayers = useMemo(() => (session ? getRoundReadyPlayers(session) : []), [session]);
-  const inactivePlayers = useMemo(
-    () => (session ? session.players.filter((player) => !player.connected && !player.kicked) : []),
-    [session]
-  );
   const readyPlayers = roundReadyPlayers.filter((player) => player.ready).length;
   const allReady = session ? allPlayersReady(session) : false;
   const localPlayerReady = Boolean(
@@ -1288,6 +1296,7 @@ export default function QuizPage() {
       peerId,
       name: nextLocalPlayerWithJoinRound.name,
       role: session ? "host" : "player",
+      // REQ-MODE-001: Party mode only advertises Spotify-authenticated clients as host-eligible.
       canHost: Boolean(tokenRef.current),
     });
 
@@ -1314,6 +1323,8 @@ export default function QuizPage() {
           type: "session:player-join",
           reliable: true,
           player: localPlayerRef.current,
+          // REQ-REC-003: Share name/score-only recovery metadata with live peers on join.
+          recoveryLedger: loadPlayerRecoveryLedger(nextRoomId),
         });
       }
       if (isHostRef.current || remotePeerId === hostPeerIdRef.current) {
@@ -1336,6 +1347,8 @@ export default function QuizPage() {
         type: "session:player-join",
         reliable: true,
         player: nextLocalPlayerWithJoinRound,
+        // REQ-REC-003: Share name/score-only recovery metadata with the room on join.
+        recoveryLedger: loadPlayerRecoveryLedger(nextRoomId),
       });
 
       if (nextLocalPlayerWithJoinRound.joinRoundNumber > (sessionRef.current?.rounds.length || 0) + 1) {
@@ -1347,6 +1360,17 @@ export default function QuizPage() {
     client.socket.addEventListener("close", () => {
       setIsConnectedToSignal(false);
       setSignalStatus("Disconnected from signaling room.");
+    });
+
+    client.on("room:join-rejected", (message) => {
+      setSignalStatus("Join rejected.");
+      setStatus(message.message || "Could not join the room.");
+      setIsConnectedToSignal(false);
+      autoConnectedRoomRef.current = "";
+      webRtcRoom.close();
+      if (!sessionRef.current) {
+        setRoomId("");
+      }
     });
 
     client.on("room:welcome", (message) => {
@@ -1378,6 +1402,7 @@ export default function QuizPage() {
     });
 
     client.on("peer:left", (message) => {
+      // REQ-DISC-003: Remove leavers from active session state.
       setPeers((currentPeers) =>
         currentPeers.filter((peer) => peer.peerId !== message.peerId)
       );
@@ -2359,19 +2384,6 @@ export default function QuizPage() {
                 </li>
               ))}
             </ul>
-            {inactivePlayers.length > 0 && (
-              <div className="songle-inner-panel mt-4 p-3 text-sm">
-                <p className="font-bold">Left Session</p>
-                <ul className="mt-2 flex flex-col gap-1">
-                  {inactivePlayers.map((player) => (
-                    <li key={player.id} className="flex justify-between gap-2">
-                      <span className="min-w-0 truncate">{player.name}</span>
-                      <span className="shrink-0">left</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
           </CardContent>
         </Card>
       )}

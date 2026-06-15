@@ -105,15 +105,14 @@ export function getRoundReadyPlayers(session) {
 }
 
 export function markPlayerLeft(session, playerId) {
+  // REQ-DISC-003: Leavers are removed from the active session while their score entry remains recoverable.
   const leavingPlayer = session.players.find((player) => player.id === playerId);
-  if (!leavingPlayer || !leavingPlayer.connected) return session;
+  if (!leavingPlayer) return session;
 
   return addActivity(
     {
       ...session,
-      players: session.players.map((player) =>
-        player.id === playerId ? { ...player, connected: false, ready: false } : player
-      ),
+      players: session.players.filter((player) => player.id !== playerId),
     },
     `${leavingPlayer.name} left the room.`
   );
